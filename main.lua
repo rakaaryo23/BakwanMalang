@@ -469,65 +469,121 @@ end
 
 
 
+
 --==================================================
--- MODULE LOADER
+-- AUTO MODULE DISCOVERY LOADER
 --==================================================
 
-local function LoadHubModule(moduleName, url)
+local HttpService = game:GetService("HttpService")
 
-    print("[HUB] Loading module:", moduleName)
+local MODULES_API =
+    "https://api.github.com/repos/rakaaryo23/GrowBlox-Script/contents/modules?ref=main"
 
-    -- Download source dari GitHub
+local function LoadOneModule(fileName, downloadUrl)
+
+    print("[HUB] Loading:", fileName)
+
+    -- Download source
     local downloadOK, source = pcall(function()
-        return game:HttpGet(url)
+        return game:HttpGet(downloadUrl)
     end)
 
     if not downloadOK or type(source) ~= "string" then
-        warn("[HUB] Download gagal:", moduleName, source)
+        warn("[HUB] Download failed:", fileName, source)
         return false
     end
 
-    -- Compile source Lua
+    -- Compile source
     local compileOK, moduleChunk = pcall(function()
         return loadstring(source)
     end)
 
     if not compileOK or type(moduleChunk) ~= "function" then
-        warn("[HUB] Compile gagal:", moduleName, moduleChunk)
+        warn("[HUB] Compile failed:", fileName, moduleChunk)
         return false
     end
 
-    -- Jalankan chunk untuk mendapatkan fungsi module
+    -- Execute module chunk
     local executeOK, moduleFunction = pcall(moduleChunk)
 
     if not executeOK or type(moduleFunction) ~= "function" then
-        warn("[HUB] Module tidak valid:", moduleName, moduleFunction)
+        warn("[HUB] Invalid module:", fileName, moduleFunction)
         return false
     end
 
-    -- Kirim objek Hub ke module
+    -- Initialize module with Hub
     local initOK, initError = pcall(moduleFunction, Hub)
 
     if not initOK then
-        warn("[HUB] Init gagal:", moduleName, initError)
+        warn("[HUB] Init failed:", fileName, initError)
         return false
     end
 
-    print("[HUB] Module loaded:", moduleName)
+    print("[HUB] Loaded:", fileName)
     return true
 end
 
---==================================================
--- REGISTER MODULES
---==================================================
+local function LoadAllModules()
 
-LoadHubModule(
-    "Auto PUT + BREAK",
-    "https://raw.githubusercontent.com/rakaaryo23/GrowBlox-Script/main/modules/APB.lua"
-)
+    print("[HUB] Discovering modules...")
+
+    -- Get folder listing from GitHub API
+    local requestOK, response = pcall(function()
+        return game:HttpGet(MODULES_API)
+    end)
+
+    if not requestOK then
+        warn("[HUB] Cannot read modules folder:", response)
+        return
+    end
+
+    -- Decode JSON
+    local decodeOK, files = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+
+    if not decodeOK or type(files) ~= "table" then
+        warn("[HUB] Invalid GitHub API response.")
+        return
+    end
+
+    local loaded = 0
+    local failed = 0
+
+    -- Find every .lua file
+    for _, file in ipairs(files) do
+
+        if file.type == "file"
+            and type(file.name) == "string"
+            and file.name:match("%.lua$")
+            and type(file.download_url) == "string" then
+
+            local success = LoadOneModule(
+                file.name,
+                file.download_url
+            )
+
+            if success then
+                loaded += 1
+            else
+                failed += 1
+            end
+
+        end
+    end
+
+    print("--------------------------------")
+    print("[HUB] MODULE DISCOVERY COMPLETE")
+    print("[HUB] Loaded:", loaded)
+    print("[HUB] Failed:", failed)
+    print("--------------------------------")
+end
+
+-- Start automatic discovery
+LoadAllModules()
 
 --==================================================
--- END MODULE LOADER
+-- END AUTO MODULE LOADER
 --==================================================
 
 
