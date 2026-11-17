@@ -1,257 +1,269 @@
--- Collect Experiment: 1 drop above player
--- Minimal diagnostic. Does NOT call World.takeDrop or any pickup Remote.
--- Test: stand directly below one visible drop, then press the button.
+--==================================================
+-- MODULE: COLLECT EXPERIMENT - ONE DROP ABOVE PLAYER
+-- UI/event pattern copied from Auto_PUT_BREAK_Submenu_Fixed(1).lua
+-- Test target: one drop directly above the player.
+-- Does not call World.takeDrop or any pickup Remote.
+--==================================================
 
-return function(Hub)
-    assert(Hub and type(Hub.RegisterTab) == "function", "Hub.RegisterTab tidak ditemukan")
+Hub.RegisterTab("Collect Experiment", function(page, Hub)
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
 
-    Hub.RegisterTab("Collect Experiment", function(page)
-        local Players = game:GetService("Players")
-        local VIM = game:GetService("VirtualInputManager")
-        local player = Players.LocalPlayer
-        local running = false
-        local status -- declared before notify() so the function updates this UI label
+    local running = false
+    local statusLabel
+    local testButton
 
-        local function raw(t, k)
-            if type(t) ~= "table" then return nil end
-            local ok, v = pcall(rawget, t, k)
-            return ok and v or nil
+    local function create(className, properties, parent)
+        local object = Instance.new(className)
+        for property, value in pairs(properties or {}) do
+            object[property] = value
         end
+        object.Parent = parent
+        return object
+    end
 
-        local function discover()
-            if type(getgc) ~= "function" then
-                return nil, nil, "getgc tidak tersedia"
-            end
+    local function corner(object, radius)
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, radius or 7)
+        c.Parent = object
+    end
 
-            local ok, objects = pcall(getgc, true)
-            if not ok or type(objects) ~= "table" then
-                return nil, nil, "getgc(true) gagal"
-            end
-
-            local world, stateFn
-            for _, obj in ipairs(objects) do
-                if type(obj) == "table" then
-                    if not world
-                        and type(raw(obj, "fg")) == "table"
-                        and type(raw(obj, "bg")) == "table"
-                        and type(raw(obj, "w")) == "number"
-                        and type(raw(obj, "h")) == "number"
-                        and raw(obj, "spawn") ~= nil
-                        and type(raw(obj, "dropList")) == "function" then
-                        world = obj
-                    end
-
-                    if not stateFn then
-                        local fn = raw(obj, "state")
-                        if type(fn) == "function" then
-                            local good, state = pcall(fn)
-                            if good and type(state) == "table"
-                                and type(state.x) == "number"
-                                and type(state.y) == "number"
-                                and state.facing ~= nil and state.vx ~= nil then
-                                stateFn = fn
-                            end
-                        end
-                    end
-                end
-                if world and stateFn then break end
-            end
-
-            if not world then return nil, nil, "World dengan dropList() tidak ditemukan" end
-            if not stateFn then return nil, nil, "fungsi player state tidak ditemukan" end
-            return world, stateFn
+    local function report(message)
+        message = tostring(message)
+        if statusLabel and statusLabel.Parent then
+            statusLabel.Text = "STATUS: " .. message
         end
+        print("[Collect Experiment] " .. message)
+    end
 
-        local function inventorySnapshot()
-            local char = player.Character
-            local stats = player:FindFirstChild("leaderstats")
-            local values = {}
-            if stats then
-                for _, v in ipairs(stats:GetChildren()) do
-                    if v:IsA("IntValue") or v:IsA("NumberValue") then
-                        values[v.Name] = v.Value
-                    end
-                end
-            end
-            return values
-        end
-
-        local function snapshotText(before, after)
-            local changes = {}
-            for name, value in pairs(after) do
-                local old = before[name]
-                if old ~= nil and old ~= value then
-                    changes[#changes + 1] = name .. ": " .. tostring(old) .. " -> " .. tostring(value)
-                end
-            end
-            return #changes > 0 and table.concat(changes, ", ") or "Tidak ada perubahan leaderstats yang terbaca"
-        end
-
-        local function notify(msg)
-            msg = tostring(msg)
-            if status then
-                pcall(function()
-                    status.Text = msg
-                end)
-            end
-            pcall(function()
-                game:GetService("StarterGui"):SetCore("SendNotification", {
-                    Title = "Collect Experiment",
-                    Text = msg,
-                    Duration = 8
-                })
-            end)
-            print("[Collect Experiment] " .. msg)
-        end
-
-        local function make(class, props, parent)
-            local obj = Instance.new(class)
-            for k, v in pairs(props) do obj[k] = v end
-            obj.Parent = parent
-            return obj
-        end
-
-        status = make("TextLabel", {
-            Name = "CollectExperimentStatus",
-            Position = UDim2.fromOffset(4, 4),
-            Size = UDim2.new(1, -8, 0, 76),
-            BackgroundColor3 = Color3.fromRGB(28, 32, 42),
-            BackgroundTransparency = 0.08,
-            Text = "STATUS: SIAP\\nSiapkan 1 drop tepat di atas player, lalu tekan TEST.",
-            TextColor3 = Color3.fromRGB(245, 245, 245),
+    local function makeLabel(text, height)
+        return create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, height or 34),
+            BackgroundTransparency = 1,
+            Text = text,
+            TextColor3 = Color3.fromRGB(76, 43, 57),
             Font = Enum.Font.Gotham,
-            TextSize = 13,
-            TextWrapped = true,
+            TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Center,
+            TextWrapped = true,
         }, page)
+    end
 
-        local testButton = make("TextButton", {
-            Name = "TestOneDropAbovePlayer",
-            Position = UDim2.fromOffset(4, 88),
-            Size = UDim2.new(1, -8, 0, 46),
-            BackgroundColor3 = Color3.fromRGB(35, 145, 92),
+    local function makeButton(text, height, color)
+        local b = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, height or 36),
+            BackgroundColor3 = color or Color3.fromRGB(171, 91, 119),
             BorderSizePixel = 0,
-            Text = "TEST 1 DROP DI ATAS PLAYER",
-            TextColor3 = Color3.fromRGB(255, 255, 255),
+            Text = text,
+            TextColor3 = Color3.fromRGB(255, 249, 251),
             Font = Enum.Font.GothamBold,
             TextSize = 11,
             AutoButtonColor = true,
+            Active = true,
+            Selectable = true,
         }, page)
-        local buttonCorner = Instance.new("UICorner")
-        buttonCorner.CornerRadius = UDim.new(0, 7)
-        buttonCorner.Parent = testButton
+        corner(b, 7)
+        return b
+    end
 
-        local function runOneDropTest()
-            if running then
-                notify("TEST MASIH BERJALAN. Tunggu hasil sebelumnya.")
-                return
-            end
-            running = true
-            -- Immediate UI acknowledgement: confirms the tap callback fired.
-            notify("TOMBOL TERTEKAN. Memeriksa referensi game...")
-            testButton.Text = "SEDANG MENGUJI..."
-            testButton.Active = false
-            testButton.AutoButtonColor = false
+    create("UIListLayout", {
+        Padding = UDim.new(0, 7),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    }, page)
 
-            task.spawn(function()
-                local ok, result = pcall(function()
-                    local world, stateFn, err = discover()
-                    assert(world and stateFn, err or "Referensi game tidak lengkap")
+    statusLabel = makeLabel(
+        "STATUS: SIAP. Berdiri tepat di bawah satu drop, lalu tekan tombol.",
+        58
+    )
+    statusLabel.LayoutOrder = 1
 
-                    local good, state = pcall(stateFn)
-                    assert(good and type(state) == "table", "Gagal membaca posisi player")
-                    assert(state.active ~= false and not state.dead, "Player tidak aktif/alive")
+    testButton = makeButton(
+        "TEST 1 DROP DI ATAS PLAYER",
+        42,
+        Color3.fromRGB(55, 140, 90)
+    )
+    testButton.LayoutOrder = 2
 
-                    local listOk, drops = pcall(world.dropList)
-                    assert(listOk and type(drops) == "table", "World.dropList() gagal")
+    local function raw(t, k)
+        if type(t) ~= "table" then return nil end
+        local ok, value = pcall(rawget, t, k)
+        if ok then return value end
+        return nil
+    end
 
-                    -- Source k(5).lua: drop di atas kepala berada dalam rentang 0.9–2.6 tile.
-                    -- Pilih satu drop terdekat yang hampir tepat di atas posisi player.
-                    local target, bestScore
-                    for _, d in ipairs(drops) do
-                        if type(d) == "table"
-                            and type(d.x) == "number"
-                            and type(d.y) == "number"
-                            and (d.n or 0) > 0
-                            and d.armed ~= false
-                            and not d.taking then
-                            local dx = math.abs(d.x - state.x)
-                            local dy = state.y - d.y
-                            if dx <= 0.6 and dy > 0.9 and dy <= 2.6 then
-                                local score = dx * dx + math.abs(dy - 1.5) * 0.2
-                                if not bestScore or score < bestScore then
-                                    target, bestScore = d, score
-                                end
-                            end
-                        end
-                    end
+    local function discoverWorldAndState()
+        if type(getgc) ~= "function" then
+            return nil, nil, "getgc tidak tersedia"
+        end
 
-                    assert(target, "Tidak ada drop 1–2.6 tile di atas player. Posisikan player tepat di bawah satu drop.")
+        local ok, objects = pcall(getgc, true)
+        if not ok or type(objects) ~= "table" then
+            return nil, nil, "getgc(true) gagal"
+        end
 
-                    local uid = target.uid
-                    local amountBefore = target.n
-                    local invBefore = inventorySnapshot()
+        local world, stateFunction
+        for _, obj in ipairs(objects) do
+            if type(obj) == "table" then
+                if not world
+                    and type(raw(obj, "fg")) == "table"
+                    and type(raw(obj, "bg")) == "table"
+                    and type(raw(obj, "w")) == "number"
+                    and type(raw(obj, "h")) == "number"
+                    and raw(obj, "spawn") ~= nil
+                    and type(raw(obj, "dropList")) == "function" then
+                    world = obj
+                end
 
-                    notify(("Target UID %s | item %s | stack %s. Melompat..."):format(
-                        tostring(uid), tostring(target.id), tostring(amountBefore)
-                    ))
-
-                    -- Satu kali tap jump. Tidak memindahkan CFrame/posisi karakter,
-                    -- tidak memanggil fungsi pickup atau Remote.
-                    VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                    task.wait(0.25)
-                    VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-
-                    -- Tunggu balasan server dan pembaruan daftar drop.
-                    task.wait(1.5)
-
-                    local stillThere, remaining
-                    local checkOk, freshDrops = pcall(world.dropList)
-                    if checkOk and type(freshDrops) == "table" then
-                        for _, d in ipairs(freshDrops) do
-                            if type(d) == "table" and d.uid == uid then
-                                stillThere = true
-                                remaining = d.n
+                if not stateFunction then
+                    for _, value in pairs(obj) do
+                        if type(value) == "function" then
+                            local good, state = pcall(value)
+                            if good and type(state) == "table"
+                                and type(state.x) == "number"
+                                and type(state.y) == "number"
+                                and state.facing ~= nil
+                                and state.vx ~= nil then
+                                stateFunction = value
                                 break
                             end
                         end
                     end
-
-                    local invAfter = inventorySnapshot()
-                    local invChange = snapshotText(invBefore, invAfter)
-
-                    if not stillThere then
-                        return ("HASIL: UID %s hilang dari dropList setelah jump. Inventori/leaderstats: %s"):format(
-                            tostring(uid), invChange
-                        )
-                    elseif type(remaining) == "number" and remaining < amountBefore then
-                        return ("HASIL: UID %s berkurang %s -> %s. Inventori/leaderstats: %s"):format(
-                            tostring(uid), tostring(amountBefore), tostring(remaining), invChange
-                        )
-                    else
-                        return ("HASIL: UID %s masih ada (stack %s). Inventori/leaderstats: %s"):format(
-                            tostring(uid), tostring(remaining or amountBefore), invChange
-                        )
-                    end
-                end)
-
-                running = false
-                testButton.Text = "TEST 1 DROP DI ATAS PLAYER"
-                testButton.Active = true
-                testButton.AutoButtonColor = true
-                if ok then
-                    notify(result)
-                else
-                    notify("TEST GAGAL: " .. tostring(result))
                 end
-            end)
+            end
+            if world and stateFunction then break end
         end
 
-        testButton.Active = true
-        testButton.Selectable = true
-        testButton.ZIndex = 20
-        status.ZIndex = 20
-        testButton.Activated:Connect(runOneDropTest)
-    end)
-end
+        if not world then return nil, nil, "World/dropList tidak ditemukan" end
+        if not stateFunction then return nil, nil, "Fungsi State tidak ditemukan" end
+        return world, stateFunction
+    end
+
+    local function inventorySnapshot()
+        local result = {}
+        local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+        if leaderstats then
+            for _, value in ipairs(leaderstats:GetChildren()) do
+                if value:IsA("IntValue") or value:IsA("NumberValue") then
+                    result[value.Name] = value.Value
+                end
+            end
+        end
+        return result
+    end
+
+    local function inventoryDiff(before, after)
+        local changes = {}
+        for name, value in pairs(after) do
+            if before[name] ~= nil and before[name] ~= value then
+                changes[#changes + 1] = name .. " " .. tostring(before[name]) .. " -> " .. tostring(value)
+            end
+        end
+        return #changes > 0 and table.concat(changes, ", ") or "tidak ada perubahan leaderstats"
+    end
+
+    local function runTest()
+        if running then
+            report("TEST masih berjalan.")
+            return
+        end
+
+        running = true
+        testButton.Text = "SEDANG MENGUJI..."
+        testButton.BackgroundColor3 = Color3.fromRGB(130, 105, 75)
+        report("TOMBOL TERTEKAN. Mencari satu drop di atas player...")
+
+        task.spawn(function()
+            local ok, message = pcall(function()
+                local world, stateFunction, err = discoverWorldAndState()
+                assert(world and stateFunction, err or "Referensi tidak lengkap")
+
+                local stateOk, state = pcall(stateFunction)
+                assert(stateOk and type(state) == "table", "Gagal membaca state player")
+                assert(type(state.x) == "number" and type(state.y) == "number", "Koordinat player tidak valid")
+
+                local listOk, drops = pcall(world.dropList)
+                assert(listOk and type(drops) == "table", "World.dropList gagal")
+
+                local target, bestScore
+                for _, drop in ipairs(drops) do
+                    if type(drop) == "table"
+                        and type(drop.x) == "number"
+                        and type(drop.y) == "number"
+                        and type(drop.n) == "number"
+                        and drop.n > 0
+                        and drop.armed ~= false
+                        and not drop.taking then
+                        local dx = math.abs(drop.x - state.x)
+                        local dy = state.y - drop.y
+                        if dx <= 0.6 and dy > 0.9 and dy <= 2.6 then
+                            local score = dx * dx + math.abs(dy - 1.5) * 0.2
+                            if not bestScore or score < bestScore then
+                                target, bestScore = drop, score
+                            end
+                        end
+                    end
+                end
+
+                assert(target, "Tidak ada drop 0.9–2.6 tile di atas player. Atur posisi lalu coba lagi.")
+
+                local uid = target.uid
+                local beforeCount = target.n
+                local invBefore = inventorySnapshot()
+
+                report(("Target ditemukan: UID %s | ID %s | stack %s. Menguji input lompat..."):format(
+                    tostring(uid), tostring(target.id), tostring(beforeCount)
+                ))
+
+                -- Trigger normal Humanoid jump from the client (no remote pickup).
+                local character = LocalPlayer.Character
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                assert(humanoid, "Humanoid tidak ditemukan")
+                humanoid.Jump = true
+                task.wait(0.15)
+                humanoid.Jump = false
+
+                task.wait(1.5)
+
+                local stillThere, afterCount = false, nil
+                local freshOk, freshDrops = pcall(world.dropList)
+                if freshOk and type(freshDrops) == "table" then
+                    for _, drop in ipairs(freshDrops) do
+                        if type(drop) == "table" and drop.uid == uid then
+                            stillThere = true
+                            afterCount = drop.n
+                            break
+                        end
+                    end
+                end
+
+                local invAfter = inventorySnapshot()
+                local invResult = inventoryDiff(invBefore, invAfter)
+
+                if not stillThere then
+                    return ("UID %s HILANG dari dropList. Inventori: %s"):format(tostring(uid), invResult)
+                elseif type(afterCount) == "number" and afterCount < beforeCount then
+                    return ("UID %s BERKURANG %s -> %s. Inventori: %s"):format(
+                        tostring(uid), tostring(beforeCount), tostring(afterCount), invResult
+                    )
+                end
+                return ("UID %s MASIH ADA (stack %s). Inventori: %s"):format(
+                    tostring(uid), tostring(afterCount or beforeCount), invResult
+                )
+            end)
+
+            running = false
+            testButton.Text = "TEST 1 DROP DI ATAS PLAYER"
+            testButton.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
+
+            if ok then
+                report(message)
+            else
+                report("GAGAL: " .. tostring(message))
+            end
+        end)
+    end
+
+    -- Same mobile-friendly event pattern as the working Auto PUT + BREAK module.
+    testButton.Activated:Connect(runTest)
+end)
