@@ -9,6 +9,8 @@ return function(Hub)
     Hub.RegisterTab("Auto Collect", function(page, Hub)
         local Players = game:GetService("Players")
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local WorldRemotes = ReplicatedStorage:WaitForChild("WorldRemotes")
+        local TakeDropRemote = WorldRemotes:FindFirstChild("TakeDrop") -- fallback game lama, sama seperti k(5).lua
         local LocalPlayer = Players.LocalPlayer
 
         local destroyed, running = false, false
@@ -278,7 +280,7 @@ return function(Hub)
         -- disertakan karena modul ini berdiri sendiri dan tidak berbagi State/Stats utama.
         local function takeDrop(d)
             local worldTake = refs.World and rawget(refs.World, "takeDrop")
-            if type(worldTake) ~= "function" then return false end
+            if type(worldTake) ~= "function" and not TakeDropRemote then return false end
             if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
             if d.armed == false and d.id ~= 112 then return false end
 
@@ -300,7 +302,12 @@ return function(Hub)
                 pcall(function() d.frame.Visible = false end)
             end
 
-            local ok, taken = pcall(worldTake, d.uid, amount)
+            local ok, taken
+            if type(worldTake) == "function" then
+                ok, taken = pcall(worldTake, d.uid, amount) -- game baru
+            else
+                ok, taken = pcall(TakeDropRemote.InvokeServer, TakeDropRemote, d.uid, amount) -- game lama
+            end
             d.taking = false
 
             if not (ok and type(taken) == "number" and taken > 0) then
@@ -336,31 +343,51 @@ return function(Hub)
             return not (fail and now < fail)
         end
 
+        -- Satu giliran hanya memproses SATU DROP OBJECT (uid) dari SATU TILE.
+        -- d.n tetap dikirim utuh ke takeDrop: jika stack di titik itu berisi 200,
+        -- 200 diambil sebagai satu stack. Drop uid lain di tile yang sama diproses
+        -- pada giliran berikutnya. Setelah tiap giliran, daftar drop discan ulang.
+        local tileCursor = 1
+
+        local function selectedTiles()
+            local tiles = {}
+            for dy = -2, 2 do
+                for dx = -2, 2 do
+                    local key = dx .. "," .. dy
+                    if enabled[key] == true then
+                        tiles[#tiles + 1] = { dx = dx, dy = dy, key = key }
+                    end
+                end
+            end
+            return tiles
+        end
+
         local function remoteTick()
             local list = Drops.list
             if type(list) ~= "table" then return end
             local px, py = playerTile()
             if not px then return end
-            local now = os.clock()
 
+            local tiles = selectedTiles()
+            if #tiles == 0 then tileCursor = 1; return end
+            if tileCursor > #tiles then tileCursor = 1 end
+
+            -- Cari satu drop saja pada tile giliran ini. Tidak ada task.spawn
+            -- paralel, sehingga request Remote tidak menumpuk untuk 25 tile.
+            local tile = tiles[tileCursor]
+            tileCursor += 1
+            if tileCursor > #tiles then tileCursor = 1 end
+
+            local target = { x = px + tile.dx, y = py + tile.dy }
+            local now = os.clock()
             for i = #list, 1, -1 do
                 local d = list[i]
-                if canTry(d, now) then
-                    local hit = false
-                    for dy = -2, 2 do
-                        for dx = -2, 2 do
-                            local key = dx .. "," .. dy
-                            if enabled[key] == true
-                                and inTile({x = px + dx, y = py + dy}, d.x, d.y) then
-                                hit = true
-                                break
-                            end
-                        end
-                        if hit then break end
-                    end
-                    if hit then task.spawn(takeDrop, d) end
+                if canTry(d, now) and inTile(target, d.x, d.y) then
+                    takeDrop(d) -- panggilan sinkron: tunggu hasil server sebelum giliran berikutnya
+                    return -- selalu scan ulang list pada tick berikutnya
                 end
             end
+            -- Tidak ada drop pada tile ini; tick berikutnya beralih ke tile berikutnya.
         end
 
         -- UI dasar.
@@ -543,6 +570,7 @@ return function(Hub)
                     status.Text = "Status: daftar drop belum ditemukan"
                     return
                 end
+                tileCursor = 1
                 setRunning(true)
             else
                 setRunning(false)
