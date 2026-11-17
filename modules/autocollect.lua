@@ -6,11 +6,9 @@
 return function(Hub)
     assert(Hub and type(Hub.RegisterTab) == "function", "Hub.RegisterTab tidak ditemukan")
 
-    Hub.RegisterTab("Auto Collect", function(page)
+    Hub.RegisterTab("Auto Collect", function(page, Hub)
         local Players = game:GetService("Players")
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
-        local WorldRemotes = ReplicatedStorage:WaitForChild("WorldRemotes")
-        local TakeDropRemote = WorldRemotes:FindFirstChild("TakeDrop") -- fallback game lama, sama seperti k(5).lua
         local LocalPlayer = Players.LocalPlayer
 
         local destroyed, running = false, false
@@ -280,7 +278,7 @@ return function(Hub)
         -- disertakan karena modul ini berdiri sendiri dan tidak berbagi State/Stats utama.
         local function takeDrop(d)
             local worldTake = refs.World and rawget(refs.World, "takeDrop")
-            if type(worldTake) ~= "function" and not TakeDropRemote then return false end
+            if type(worldTake) ~= "function" then return false end
             if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
             if d.armed == false and d.id ~= 112 then return false end
 
@@ -302,12 +300,7 @@ return function(Hub)
                 pcall(function() d.frame.Visible = false end)
             end
 
-            local ok, taken
-            if type(worldTake) == "function" then
-                ok, taken = pcall(worldTake, d.uid, amount) -- game baru
-            else
-                ok, taken = pcall(TakeDropRemote.InvokeServer, TakeDropRemote, d.uid, amount) -- game lama
-            end
+            local ok, taken = pcall(worldTake, d.uid, amount)
             d.taking = false
 
             if not (ok and type(taken) == "number" and taken > 0) then
@@ -343,103 +336,143 @@ return function(Hub)
             return not (fail and now < fail)
         end
 
-        -- Satu giliran hanya memproses SATU DROP OBJECT (uid) dari SATU TILE.
-        -- d.n tetap dikirim utuh ke takeDrop: jika stack di titik itu berisi 200,
-        -- 200 diambil sebagai satu stack. Drop uid lain di tile yang sama diproses
-        -- pada giliran berikutnya. Setelah tiap giliran, daftar drop discan ulang.
-        local tileCursor = 1
+        -- Cari satu objek drop pada tile tertentu.
+        -- Satu objek UID = satu titik drop; d.n boleh berisi stack sampai 200.
+        local function findDropAtTile(tileX, tileY)
+            findDropRefs() -- refresh daftar drop sebelum setiap pemeriksaan
+            local list = Drops.list
+            if type(list) ~= "table" then return nil, false end
 
-        local function selectedTiles()
-            local tiles = {}
-            for dy = -2, 2 do
-                for dx = -2, 2 do
-                    local key = dx .. "," .. dy
-                    if enabled[key] == true then
-                        tiles[#tiles + 1] = { dx = dx, dy = dy, key = key }
+            local now = os.clock()
+            local firstBlocked = nil
+
+            -- Satu objek dipilih per iterasi; tidak ada task.spawn massal.
+            for i = #list, 1, -1 do
+                local d = list[i]
+                if type(d) == "table"
+                    and (d.n or 0) > 0
+                    and type(d.x) == "number"
+                    and type(d.y) == "number"
+                    and inTile({x = tileX, y = tileY}, d.x, d.y) then
+
+                    if canTry(d, now) then
+                        return d, true
                     end
+
+                    -- Drop masih ada tetapi sedang pending/cooldown/tidak armed.
+                    -- Tile tidak dianggap bersih selama objek ini masih tercatat.
+                    firstBlocked = firstBlocked or d
                 end
             end
-            return tiles
+
+            if firstBlocked then
+                return firstBlocked, true
+            end
+            return nil, false
+        end
+
+        local function collectOneTile(dx, dy)
+            local key = dx .. "," .. dy
+            if enabled[key] ~= true then return true end
+
+            while running and not destroyed do
+                local px, py = playerTile()
+                if not px then
+                    status.Text = "Status: posisi player belum terbaca"
+                    task.wait(0.15)
+                else
+                    local tx, ty = px + dx, py + dy
+                    local drop, stillHasDrop = findDropAtTile(tx, ty)
+
+                    if not stillHasDrop then
+                        -- Tile baru dianggap bersih setelah hasil scan real-time kosong.
+                        return true
+                    end
+
+                    if drop and canTry(drop, os.clock()) then
+                        status.Text = ("Status: mengambil tile (%d,%d) | UID %s")
+                            :format(dx, dy, tostring(drop.uid))
+                        takeDrop(drop) -- tunggu hasilnya; jangan spawn paralel
+                    else
+                        status.Text = ("Status: menunggu tile (%d,%d) | drop masih ada")
+                            :format(dx, dy)
+                    end
+
+                    -- Beri waktu event/server memperbarui daftar, lalu scan tile
+                    -- yang SAMA lagi. Tidak pindah sebelum benar-benar kosong.
+                    task.wait(0.1)
+                end
+            end
+
+            return false
         end
 
         local function remoteTick()
-            local list = Drops.list
-            if type(list) ~= "table" then return end
-            local px, py = playerTile()
-            if not px then return end
-
-            local tiles = selectedTiles()
-            if #tiles == 0 then tileCursor = 1; return end
-            if tileCursor > #tiles then tileCursor = 1 end
-
-            -- Cari satu drop saja pada tile giliran ini. Tidak ada task.spawn
-            -- paralel, sehingga request Remote tidak menumpuk untuk 25 tile.
-            local tile = tiles[tileCursor]
-            tileCursor += 1
-            if tileCursor > #tiles then tileCursor = 1 end
-
-            local target = { x = px + tile.dx, y = py + tile.dy }
-            local now = os.clock()
-            for i = #list, 1, -1 do
-                local d = list[i]
-                if canTry(d, now) and inTile(target, d.x, d.y) then
-                    takeDrop(d) -- panggilan sinkron: tunggu hasil server sebelum giliran berikutnya
-                    return -- selalu scan ulang list pada tick berikutnya
+            -- Urutan tetap: baris atas ke bawah, kiri ke kanan.
+            -- Satu tile diselesaikan dulu sebelum tile berikutnya dimulai.
+            for dy = -2, 2 do
+                for dx = -2, 2 do
+                    if not running or destroyed then return end
+                    local key = dx .. "," .. dy
+                    if enabled[key] == true then
+                        local clean = collectOneTile(dx, dy)
+                        if not clean then return end
+                    end
                 end
             end
-            -- Tidak ada drop pada tile ini; tick berikutnya beralih ke tile berikutnya.
+            -- Setelah semua tile terpilih selesai, putaran berikutnya dimulai
+            -- dari tile pertama; semua tile dipindai lagi secara real-time.
         end
 
-        -- UI memakai pola APB(2).lua: UIListLayout dan LayoutOrder.
-        local function makeLabel(text, height, order)
-            return create("TextLabel", {
-                Size = UDim2.new(1, 0, 0, height or 28),
-                BackgroundTransparency = 1,
-                Text = text or "",
-                TextColor3 = Theme.Text,
-                Font = Enum.Font.Gotham,
-                TextSize = 11,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                TextYAlignment = Enum.TextYAlignment.Center,
-                TextWrapped = true,
-                LayoutOrder = order or 0,
-            }, page)
-        end
+        -- UI dasar.
+        local root = page
+        local title = create("TextLabel", {
+            Name = "AutoCollectTitle",
+            Size = UDim2.new(1, -12, 0, 28),
+            BackgroundTransparency = 1,
+            Text = "AUTO COLLECT | REMOTE",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, root)
 
-        local function makeButton(text, height, color, order)
-            local b = create("TextButton", {
-                Size = UDim2.new(1, 0, 0, height or 34),
-                BackgroundColor3 = color or Theme.PanelDark,
-                BorderSizePixel = 0,
-                Text = text,
-                TextColor3 = Theme.White,
-                Font = Enum.Font.GothamBold,
-                TextSize = 11,
-                AutoButtonColor = true,
-                LayoutOrder = order or 0,
-            }, page)
-            corner(b, 7)
-            return b
-        end
+        local status = create("TextLabel", {
+            Name = "AutoCollectStatus",
+            Position = UDim2.fromOffset(0, 30),
+            Size = UDim2.new(1, -12, 0, 34),
+            BackgroundTransparency = 1,
+            Text = "Status: menunggu scan",
+            TextColor3 = Theme.Muted,
+            Font = Enum.Font.Gotham,
+            TextSize = 11,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, root)
 
-        create("UIListLayout", {
-            Padding = UDim.new(0, 7),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, page)
+        local tileButton = create("TextButton", {
+            Position = UDim2.fromOffset(0, 70),
+            Size = UDim2.fromOffset(190, 34),
+            BackgroundColor3 = Theme.PanelDark,
+            BorderSizePixel = 0,
+            Text = "PILIH TILE (0 AKTIF)",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+        }, root)
+        corner(tileButton, 7)
 
-        local title = makeLabel("AUTO COLLECT | MODE REMOTE", 28, 1)
-        title.Font = Enum.Font.GothamBold
-        title.TextSize = 14
-        local status = makeLabel("Status: menunggu scan", 36, 2)
-        local areaLabel = makeLabel(
-            "Area: 5 x 5 | termasuk tile posisi player | urutan bergiliran",
-            28, 3
-        )
-        local tileButton = makeButton("PILIH TILE | 25/25 AKTIF", 34, Theme.PanelDark, 4)
-        tileButton.TextColor3 = Theme.Text
-        local scanButton = makeButton("SCAN ULANG", 32, Theme.PanelDark, 5)
-        scanButton.TextColor3 = Theme.Text
-        local toggle = makeButton("START AUTO COLLECT", 36, Theme.Green, 6)
+        local toggle = create("TextButton", {
+            Position = UDim2.fromOffset(198, 70),
+            Size = UDim2.fromOffset(100, 34),
+            BackgroundColor3 = Theme.Green,
+            BorderSizePixel = 0,
+            Text = "START",
+            TextColor3 = Theme.White,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+        }, root)
+        corner(toggle, 7)
 
         local function activeCount()
             local n = 0
@@ -448,7 +481,7 @@ return function(Hub)
         end
 
         local function updateTileButton()
-            tileButton.Text = ("PILIH TILE | %d/25 AKTIF"):format(activeCount())
+            tileButton.Text = ("PILIH TILE (%d AKTIF)"):format(activeCount())
         end
 
         local function closePopup()
@@ -519,9 +552,7 @@ return function(Hub)
                     local b = create("TextButton", {
                         BackgroundColor3 = enabled[key] and Theme.Green or Theme.PanelDark,
                         BorderSizePixel = 0,
-                        Text = (dx == 0 and dy == 0)
-                            and (enabled[key] and "YOU ON" or "YOU OFF")
-                            or (enabled[key] and "ON" or "OFF"),
+                        Text = (dx == 0 and dy == 0) and "YOU" or (enabled[key] and "ON" or "OFF"),
                         TextColor3 = Theme.White,
                         Font = Enum.Font.GothamBold,
                         TextSize = 10,
@@ -549,32 +580,11 @@ return function(Hub)
             toggle.Text = running and "STOP" or "START"
             toggle.BackgroundColor3 = running and Theme.Red or Theme.Green
             if running then
-                status.Text = "Status: aktif | Remote | radius tile 2"
+                status.Text = "Status: aktif | Remote | satu drop bergiliran | scan sampai tile bersih"
             else
                 status.Text = "Status: berhenti"
             end
         end
-
-        track(scanButton.Activated:Connect(function()
-            if destroyed then return end
-            status.Text = "Status: sedang scan referensi..."
-            task.spawn(function()
-                local callOk, scanOk, message = pcall(discover)
-                if not callOk then
-                    status.Text = "Status: scan error - " .. tostring(scanOk)
-                    return
-                end
-                if not scanOk then
-                    status.Text = "Status: scan gagal - " .. tostring(message)
-                    return
-                end
-                if findDropRefs() then
-                    status.Text = "Status: scan berhasil | daftar drop ditemukan"
-                else
-                    status.Text = "Status: referensi OK, daftar drop belum ditemukan"
-                end
-            end)
-        end))
 
         track(toggle.Activated:Connect(function()
             if destroyed then return end
@@ -594,7 +604,6 @@ return function(Hub)
                     status.Text = "Status: daftar drop belum ditemukan"
                     return
                 end
-                tileCursor = 1
                 setRunning(true)
             else
                 setRunning(false)
@@ -618,19 +627,14 @@ return function(Hub)
         task.spawn(function()
             while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
                 if running then
-                    if not Drops.list then
-                        if os.clock() >= Drops.nextScan then
-                            Drops.nextScan = os.clock() + 3
-                            findDropRefs()
-                        end
-                    else
-                        local ok, err = pcall(remoteTick)
-                        if not ok then
-                            status.Text = "Status: error collect - " .. tostring(err)
-                        end
+                    local ok, err = pcall(remoteTick)
+                    if not ok then
+                        status.Text = "Status: error collect - " .. tostring(err)
+                        task.wait(0.25)
                     end
+                else
+                    task.wait(0.1)
                 end
-                task.wait(0.1)
             end
         end)
 
