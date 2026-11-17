@@ -121,7 +121,7 @@ local Header = Create("Frame", {
 
 local Title = Create("TextLabel", {
     Position = UDim2.fromOffset(18, 0),
-    Size = UDim2.new(1, -120, 1, 0),
+    Size = UDim2.new(1, -150, 1, 0),
     BackgroundTransparency = 1,
     Text = "GrowBlox Hub",
     TextColor3 = Theme.Text,
@@ -145,15 +145,31 @@ local MinimizeButton = Create("TextButton", {
 }, Header)
 AddCorner(MinimizeButton, 8)
 
+local CloseButton = Create("TextButton", {
+    Name = "CloseButton",
+    AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -58, 0.5, 0),
+    Size = UDim2.fromOffset(38, 32),
+    BackgroundColor3 = Color3.fromRGB(205, 112, 132),
+    BorderSizePixel = 0,
+    Text = "X",
+    TextColor3 = Theme.White,
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    AutoButtonColor = true,
+}, Header)
+AddCorner(CloseButton, 8)
+
 --==================================================
 -- [06] DRAG WINDOW
--- Drag dapat dimulai dari header dan tiga sisi luar window.
+-- Header + tiga sisi window. Drag handles memakai TextButton
+-- transparan dengan ZIndex tinggi agar tidak tertutup konten.
 --==================================================
 
 local IsDragging = false
 local DragStart = nil
 local StartPosition = nil
-local ActiveDragInput = nil
+local ActiveTouch = nil
 
 local function BeginWindowDrag(input)
     if input.UserInputType ~= Enum.UserInputType.MouseButton1
@@ -162,73 +178,69 @@ local function BeginWindowDrag(input)
     end
 
     IsDragging = true
-    ActiveDragInput = input
+    ActiveTouch = input.UserInputType == Enum.UserInputType.Touch and input or nil
     DragStart = input.Position
     StartPosition = Main.Position
 
     input.Changed:Connect(function()
         if input.UserInputState == Enum.UserInputState.End then
             IsDragging = false
-            ActiveDragInput = nil
+            ActiveTouch = nil
         end
     end)
 end
 
-local function ConnectDragHandle(handle)
+Header.InputBegan:Connect(BeginWindowDrag)
+
+local DragBorderSize = 16
+
+local function CreateDragHandle(name, position, size)
+    local handle = Create("TextButton", {
+        Name = name,
+        Position = position,
+        Size = size,
+        BackgroundTransparency = 1,
+        BackgroundColor3 = Theme.Accent,
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        Active = true,
+        Selectable = false,
+        ZIndex = 1000,
+    }, Main)
+
     handle.InputBegan:Connect(BeginWindowDrag)
+    return handle
 end
 
-ConnectDragHandle(Header)
+CreateDragHandle(
+    "LeftDragHandle",
+    UDim2.fromOffset(0, 52),
+    UDim2.new(0, DragBorderSize, 1, -52)
+)
 
--- Drag strips: left, right, and bottom outer borders.
-local DragBorderSize = 9
+CreateDragHandle(
+    "RightDragHandle",
+    UDim2.new(1, -DragBorderSize, 0, 52),
+    UDim2.new(0, DragBorderSize, 1, -52)
+)
 
-local LeftDragBorder = Create("Frame", {
-    Name = "LeftDragBorder",
-    Position = UDim2.fromOffset(0, 52),
-    Size = UDim2.new(0, DragBorderSize, 1, -52),
-    BackgroundTransparency = 1,
-    BorderSizePixel = 0,
-    Active = true,
-    ZIndex = 50,
-}, Main)
+CreateDragHandle(
+    "BottomDragHandle",
+    UDim2.new(0, 0, 1, -DragBorderSize),
+    UDim2.new(1, 0, 0, DragBorderSize)
+)
 
-local RightDragBorder = Create("Frame", {
-    Name = "RightDragBorder",
-    AnchorPoint = Vector2.new(1, 0),
-    Position = UDim2.new(1, 0, 0, 52),
-    Size = UDim2.new(0, DragBorderSize, 1, -52),
-    BackgroundTransparency = 1,
-    BorderSizePixel = 0,
-    Active = true,
-    ZIndex = 50,
-}, Main)
-
-local BottomDragBorder = Create("Frame", {
-    Name = "BottomDragBorder",
-    AnchorPoint = Vector2.new(0, 1),
-    Position = UDim2.new(0, 0, 1, 0),
-    Size = UDim2.new(1, 0, 0, DragBorderSize),
-    BackgroundTransparency = 1,
-    BorderSizePixel = 0,
-    Active = true,
-    ZIndex = 50,
-}, Main)
-
-ConnectDragHandle(LeftDragBorder)
-ConnectDragHandle(RightDragBorder)
-ConnectDragHandle(BottomDragBorder)
-
-UserInputService.InputChanged:Connect(function(input)
-    if not IsDragging then
+local DragInputConnection = UserInputService.InputChanged:Connect(function(input)
+    if IsClosed or not IsDragging then
         return
     end
 
     local isMouseMove = input.UserInputType == Enum.UserInputType.MouseMovement
-    local isTouchMove = input.UserInputType == Enum.UserInputType.Touch
-        and ActiveDragInput ~= nil
+    local isActiveTouchMove = ActiveTouch ~= nil
+        and input == ActiveTouch
 
-    if isMouseMove or isTouchMove then
+    if isMouseMove or isActiveTouchMove then
         local delta = input.Position - DragStart
         Main.Position = UDim2.new(
             StartPosition.X.Scale,
@@ -304,6 +316,50 @@ local SelectedTab = nil
 local TabOrder = {}
 
 local Hub = {}
+
+--==================================================
+-- [10A] LIFECYCLE / CLEANUP REGISTRY
+-- Setiap modul fitur wajib mendaftarkan cleanup agar prosesnya
+-- ikut dihentikan saat tombol CLOSE ditekan.
+--==================================================
+
+local IsClosed = false
+local CleanupCallbacks = {}
+
+function Hub.IsClosing()
+    return IsClosed
+end
+
+function Hub.RegisterCleanup(callback)
+    assert(type(callback) == "function", "Cleanup harus berupa function.")
+
+    if IsClosed then
+        pcall(callback)
+        return
+    end
+
+    table.insert(CleanupCallbacks, callback)
+end
+
+local function RunAllCleanups()
+    if IsClosed then
+        return
+    end
+
+    IsClosed = true
+
+    -- Jalankan cleanup dalam urutan terbalik (terakhir didaftarkan,
+    -- pertama dihentikan), agar modul yang bergantung pada modul lain aman.
+    for index = #CleanupCallbacks, 1, -1 do
+        local callback = CleanupCallbacks[index]
+        local ok, err = pcall(callback)
+        if not ok then
+            warn("[GrowBlox Hub] Cleanup error: " .. tostring(err))
+        end
+    end
+
+    table.clear(CleanupCallbacks)
+end
 
 function Hub.RegisterTab(tabName, buildFunction)
     assert(type(tabName) == "string" and tabName ~= "", "Tab name is required.")
@@ -420,6 +476,8 @@ local IsMinimized = false
 local NormalSize = UDim2.fromOffset(760, 460)
 
 MinimizeButton.Activated:Connect(function()
+    if IsClosed then return end
+
     IsMinimized = not IsMinimized
 
     if IsMinimized then
@@ -432,6 +490,30 @@ MinimizeButton.Activated:Connect(function()
         MinimizeButton.Text = "—"
     end
 end)
+
+-- CLOSE = hentikan semua modul terdaftar, putus koneksi global,
+-- hapus bridge, lalu hancurkan seluruh UI.
+local function CloseHub()
+    if IsClosed then return end
+
+    RunAllCleanups()
+
+    IsDragging = false
+    ActiveTouch = nil
+
+    if DragInputConnection then
+        DragInputConnection:Disconnect()
+        DragInputConnection = nil
+    end
+
+    if _G.GrowBloxHub == Hub then
+        _G.GrowBloxHub = nil
+    end
+
+    ScreenGui:Destroy()
+end
+
+CloseButton.Activated:Connect(CloseHub)
 
 --==================================================
 -- [13] MODULE BRIDGE
