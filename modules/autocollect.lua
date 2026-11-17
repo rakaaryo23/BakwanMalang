@@ -336,92 +336,136 @@ return function(Hub)
             return not (fail and now < fail)
         end
 
-        -- Cari satu objek drop pada tile tertentu.
-        -- Satu objek UID = satu titik drop; d.n boleh berisi stack sampai 200.
-        local function findDropAtTile(tileX, tileY)
-            findDropRefs() -- refresh daftar drop sebelum setiap pemeriksaan
-            local list = Drops.list
-            if type(list) ~= "table" then return nil, false end
+        -- Ambil snapshot terbaru dari fungsi World.dropList() pada setiap scan.
+        -- Ini memastikan daftar drop diperiksa ulang setelah setiap pengambilan.
+        local setStatus -- forward declaration: worker dibuat sebelum komponen UI
 
-            local now = os.clock()
-            local firstBlocked = nil
-
-            -- Satu objek dipilih per iterasi; tidak ada task.spawn massal.
-            for i = #list, 1, -1 do
-                local d = list[i]
-                if type(d) == "table"
-                    and (d.n or 0) > 0
-                    and type(d.x) == "number"
-                    and type(d.y) == "number"
-                    and inTile({x = tileX, y = tileY}, d.x, d.y) then
-
-                    if canTry(d, now) then
-                        return d, true
+        local function refreshDropList()
+            local dropListFn = refs.World and rawget(refs.World, "dropList")
+            if type(dropListFn) == "function" then
+                local ok, list = pcall(dropListFn)
+                if ok and type(list) == "table" then
+                    if Drops.list ~= list then
+                        Drops.list = list
+                        Drops.update = nil
                     end
-
-                    -- Drop masih ada tetapi sedang pending/cooldown/tidak armed.
-                    -- Tile tidak dianggap bersih selama objek ini masih tercatat.
-                    firstBlocked = firstBlocked or d
                 end
             end
-
-            if firstBlocked then
-                return firstBlocked, true
+            if type(Drops.list) ~= "table" then
+                findDropRefs()
             end
-            return nil, false
+            return Drops.list
         end
 
-        local function collectOneTile(dx, dy)
-            local key = dx .. "," .. dy
-            if enabled[key] ~= true then return true end
+        local function dropMatchesTile(d, px, py, dx, dy)
+            return canTry(d, os.clock())
+                and inTile({ x = px + dx, y = py + dy }, d.x, d.y)
+        end
+
+        -- Satu worker saja:
+        -- 1) memilih satu tile;
+        -- 2) mengambil satu UID secara synchronous;
+        -- 3) scan ulang tile yang sama sampai kosong;
+        -- 4) baru lanjut ke tile berikutnya.
+        -- Tidak ada task.spawn(takeDrop, ...) per item, sehingga request tidak paralel.
+        local function sequentialCollect()
+            local offsets = {}
+            for dy = -2, 2 do
+                for dx = -2, 2 do
+                    if enabled[dx .. "," .. dy] == true then
+                        offsets[#offsets + 1] = { dx = dx, dy = dy }
+                    end
+                end
+            end
 
             while running and not destroyed do
                 local px, py = playerTile()
-                if not px then
-                    status.Text = "Status: posisi player belum terbaca"
+                if px == nil or py == nil then
+                    setStatus("Status: menunggu koordinat player...")
                     task.wait(0.15)
                 else
-                    local tx, ty = px + dx, py + dy
-                    local drop, stillHasDrop = findDropAtTile(tx, ty)
+                    local anyDropFound = false
 
-                    if not stillHasDrop then
-                        -- Tile baru dianggap bersih setelah hasil scan real-time kosong.
-                        return true
+                    for _, offset in ipairs(offsets) do
+                        if not running or destroyed then break end
+
+                        local tileHasDrops = true
+                        while running and not destroyed and tileHasDrops do
+                            local list = refreshDropList()
+                            local found = nil
+                            tileHasDrops = false
+
+                            if type(list) == "table" then
+                                -- Cari berdasarkan UID satu per satu. List bisa berubah
+                                -- akibat callback/server saat request berlangsung.
+                                for i = 1, #list do
+                                    local d = list[i]
+                                    if type(d) == "table"
+                                        and type(d.x) == "number"
+                                        and type(d.y) == "number"
+                                        and inTile({
+                                            x = px + offset.dx,
+                                            y = py + offset.dy
+                                        }, d.x, d.y)
+                                        and (d.n or 0) > 0
+                                        and d.armed ~= false
+                                        and d.id ~= nil
+                                    then
+                                        tileHasDrops = true
+                                        anyDropFound = true
+                                        if canTry(d, os.clock()) then
+                                            found = d
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+
+                            if found then
+                                -- Panggilan langsung dan tunggu hasilnya sebelum scan berikut.
+                                local ok, result = pcall(takeDrop, found)
+                                if not ok then
+                                    setStatus("Status: error take UID " ..
+                                        tostring(found.uid) .. " - " .. tostring(result))
+                                    task.wait(0.2)
+                                elseif result then
+                                    setStatus(("Status: tile (%d,%d) | UID %s diambil")
+                                        :format(offset.dx, offset.dy, tostring(found.uid)))
+                                    task.wait(0.1)
+                                else
+                                    -- Jika ditolak/cooldown, jangan pindah tile.
+                                    -- Scan ulang tile ini setelah jeda singkat.
+                                    task.wait(0.15)
+                                end
+                            elseif tileHasDrops then
+                                -- Drop masih ada tetapi sedang cooldown / tidak bisa dicoba.
+                                -- Tetap di tile yang sama; jangan melompati item.
+                                task.wait(0.15)
+                            else
+                                -- Tidak ada drop lagi pada tile ini: tile bersih.
+                                setStatus(("Status: tile (%d,%d) bersih")
+                                    :format(offset.dx, offset.dy))
+                            end
+
+                            -- Refresh koordinat karena player mungkin bergerak selama loop.
+                            px, py = playerTile()
+                            if px == nil or py == nil then
+                                tileHasDrops = false
+                                task.wait(0.15)
+                            end
+                        end
                     end
 
-                    if drop and canTry(drop, os.clock()) then
-                        status.Text = ("Status: mengambil tile (%d,%d) | UID %s")
-                            :format(dx, dy, tostring(drop.uid))
-                        takeDrop(drop) -- tunggu hasilnya; jangan spawn paralel
-                    else
-                        status.Text = ("Status: menunggu tile (%d,%d) | drop masih ada")
-                            :format(dx, dy)
+                    if running and not destroyed then
+                        if anyDropFound then
+                            setStatus("Status: satu putaran selesai | scan ulang dari tile pertama")
+                        else
+                            setStatus("Status: semua tile target bersih | memindai real-time")
+                        end
+                        task.wait(0.1)
                     end
-
-                    -- Beri waktu event/server memperbarui daftar, lalu scan tile
-                    -- yang SAMA lagi. Tidak pindah sebelum benar-benar kosong.
-                    task.wait(0.1)
                 end
             end
-
-            return false
-        end
-
-        local function remoteTick()
-            -- Urutan tetap: baris atas ke bawah, kiri ke kanan.
-            -- Satu tile diselesaikan dulu sebelum tile berikutnya dimulai.
-            for dy = -2, 2 do
-                for dx = -2, 2 do
-                    if not running or destroyed then return end
-                    local key = dx .. "," .. dy
-                    if enabled[key] == true then
-                        local clean = collectOneTile(dx, dy)
-                        if not clean then return end
-                    end
-                end
-            end
-            -- Setelah semua tile terpilih selesai, putaran berikutnya dimulai
-            -- dari tile pertama; semua tile dipindai lagi secara real-time.
         end
 
         -- UI dasar.
@@ -449,6 +493,14 @@ return function(Hub)
             TextWrapped = true,
             TextXAlignment = Enum.TextXAlignment.Left,
         }, root)
+
+        setStatus = function(message)
+            if status and status.Parent then
+                pcall(function()
+                    status.Text = tostring(message)
+                end)
+            end
+        end
 
         local tileButton = create("TextButton", {
             Position = UDim2.fromOffset(0, 70),
@@ -492,7 +544,7 @@ return function(Hub)
             if destroyed or popup then return end
             local gui = Hub.GetGui and Hub.GetGui()
             if not gui then
-                status.Text = "Status: ScreenGui Hub tidak ditemukan"
+                setStatus("Status: ScreenGui Hub tidak ditemukan")
                 return
             end
 
@@ -580,9 +632,9 @@ return function(Hub)
             toggle.Text = running and "STOP" or "START"
             toggle.BackgroundColor3 = running and Theme.Red or Theme.Green
             if running then
-                status.Text = "Status: aktif | Remote | satu drop bergiliran | scan sampai tile bersih"
+                setStatus("Status: aktif | Remote | antrean per UID")
             else
-                status.Text = "Status: berhenti"
+                setStatus("Status: berhenti")
             end
         end
 
@@ -590,18 +642,18 @@ return function(Hub)
             if destroyed then return end
             if not running then
                 if activeCount() == 0 then
-                    status.Text = "Status: pilih minimal satu tile"
+                    setStatus("Status: pilih minimal satu tile")
                     return
                 end
                 if not refs.World or not refs.Inv or not refs.State then
                     local ok, message = discover()
                     if not ok then
-                        status.Text = "Status: scan gagal - " .. tostring(message)
+                        setStatus("Status: scan gagal - " .. tostring(message))
                         return
                     end
                 end
                 if not findDropRefs() then
-                    status.Text = "Status: daftar drop belum ditemukan"
+                    setStatus("Status: daftar drop belum ditemukan")
                     return
                 end
                 setRunning(true)
@@ -615,9 +667,9 @@ return function(Hub)
             if destroyed or (Hub.IsClosing and Hub.IsClosing()) then return end
             local ok, message = pcall(discover)
             if not ok then
-                status.Text = "Status: scan error - " .. tostring(message)
+                setStatus("Status: scan error - " .. tostring(message))
             elseif message then
-                status.Text = "Status: " .. tostring(message)
+                setStatus("Status: " .. tostring(message))
             end
             if ok and refs.World then
                 findDropRefs()
@@ -627,14 +679,13 @@ return function(Hub)
         task.spawn(function()
             while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
                 if running then
-                    local ok, err = pcall(remoteTick)
+                    local ok, err = pcall(sequentialCollect)
                     if not ok then
-                        status.Text = "Status: error collect - " .. tostring(err)
+                        setStatus("Status: error collect - " .. tostring(err))
                         task.wait(0.25)
                     end
-                else
-                    task.wait(0.1)
                 end
+                task.wait(0.1)
             end
         end)
 
