@@ -481,13 +481,36 @@ MinimizeButton.Activated:Connect(function()
     IsMinimized = not IsMinimized
 
     if IsMinimized then
+        -- Jadikan UI sebuah kotak kecil yang menempel di sisi paling atas layar.
         Body.Visible = false
-        Main.Size = UDim2.fromOffset(280, 52)
-        MinimizeButton.Text = "+"
+        Title.Visible = false
+        CloseButton.Visible = false
+
+        Header.Size = UDim2.fromScale(1, 1)
+        Main.Size = UDim2.fromOffset(34, 34)
+        Main.Position = UDim2.new(0.5, 0, 0, 17)
+
+        MinimizeButton.AnchorPoint = Vector2.new(0.5, 0.5)
+        MinimizeButton.Position = UDim2.fromScale(0.5, 0.5)
+        MinimizeButton.Size = UDim2.fromOffset(30, 30)
+        MinimizeButton.Text = ""
+        MinimizeButton.BackgroundColor3 = Theme.Accent
     else
+        -- Kembalikan UI ke posisi dan ukuran normal.
         Main.Size = NormalSize
-        Body.Visible = true
+        Main.Position = UDim2.fromScale(0.5, 0.5)
+
+        Header.Size = UDim2.new(1, 0, 0, 52)
+        Title.Visible = true
+        CloseButton.Visible = true
+
+        MinimizeButton.AnchorPoint = Vector2.new(1, 0.5)
+        MinimizeButton.Position = UDim2.new(1, -12, 0.5, 0)
+        MinimizeButton.Size = UDim2.fromOffset(38, 32)
         MinimizeButton.Text = "—"
+        MinimizeButton.BackgroundColor3 = Theme.Panel
+
+        Body.Visible = true
     end
 end)
 
