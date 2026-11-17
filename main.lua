@@ -475,6 +475,42 @@ Hub.RegisterTab("Menu 2", function(page)
     -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
 end)
 
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
+Hub.RegisterTab("Menu 2", function(page)
+    -- Isi Menu 2 nanti diganti dengan UI dan fungsi fitur kedua.
+end)
+
 --==================================================
 -- [12] MINIMIZE / RESTORE
 --==================================================
