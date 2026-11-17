@@ -92,7 +92,7 @@ local Main = Create("Frame", {
     Name = "Main",
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.fromOffset(760, 460),
+    Size = UDim2.fromOffset(600, 300),
     BackgroundColor3 = Theme.Background,
     BorderSizePixel = 0,
     ClipsDescendants = true,
@@ -474,7 +474,7 @@ end)
 --==================================================
 
 local IsMinimized = false
-local NormalSize = UDim2.fromOffset(660, 150)
+local NormalSize = UDim2.fromOffset(600, 300)
 
 MinimizeButton.Activated:Connect(function()
     if IsClosed then return end
