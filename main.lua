@@ -474,7 +474,7 @@ end)
 --==================================================
 
 local IsMinimized = false
-local NormalSize = UDim2.fromOffset(700, 250)
+local NormalSize = UDim2.fromOffset(660, 150)
 
 MinimizeButton.Activated:Connect(function()
     if IsClosed then return end
