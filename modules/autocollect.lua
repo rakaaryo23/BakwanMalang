@@ -5,7 +5,10 @@
 -- Does not call World.takeDrop or any pickup Remote.
 --==================================================
 
-Hub.RegisterTab("Collect Experiment", function(page, Hub)
+return function(Hub)
+    assert(Hub and type(Hub.RegisterTab) == "function", "Hub.RegisterTab tidak ditemukan")
+
+    Hub.RegisterTab("Collect Experiment", function(page)
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
 
@@ -267,3 +270,4 @@ Hub.RegisterTab("Collect Experiment", function(page, Hub)
     -- Same mobile-friendly event pattern as the working Auto PUT + BREAK module.
     testButton.Activated:Connect(runTest)
 end)
+end
