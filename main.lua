@@ -1,5 +1,5 @@
 --[[
-GROWBLOX HUB - UI FOUNDATION V2
+GROWBLOX HUB - UI FOUNDATION OPTIMIZED
 UI dasar saja. Belum ada fungsi game / Auto PUT / BREAK.
 Tab contoh hanya "Menu 1" dan "Menu 2".
 ]]
@@ -26,6 +26,12 @@ if type(gethui) == "function" then
     end
 end
 guiParent = guiParent or CoreGui
+
+-- Shut down the previous copy before creating a new one.
+local previousHub = _G.GrowBloxHub
+if type(previousHub) == "table" and type(previousHub.Close) == "function" then
+    pcall(previousHub.Close)
+end
 
 local oldGui = guiParent:FindFirstChild("GrowBloxHubUI")
 if oldGui then
@@ -161,6 +167,10 @@ local CloseButton = Create("TextButton", {
 }, Header)
 AddCorner(CloseButton, 8)
 
+-- Shared lifecycle state, declared before input callbacks.
+local IsClosed = false
+local CleanupCallbacks = {}
+
 --==================================================
 -- [06] DRAG WINDOW
 -- Header + tiga sisi window. Drag handles memakai TextButton
@@ -173,6 +183,7 @@ local StartPosition = nil
 local ActiveTouch = nil
 
 local function BeginWindowDrag(input)
+    if IsClosed then return end
     if input.UserInputType ~= Enum.UserInputType.MouseButton1
         and input.UserInputType ~= Enum.UserInputType.Touch then
         return
@@ -182,13 +193,6 @@ local function BeginWindowDrag(input)
     ActiveTouch = input.UserInputType == Enum.UserInputType.Touch and input or nil
     DragStart = input.Position
     StartPosition = Main.Position
-
-    input.Changed:Connect(function()
-        if input.UserInputState == Enum.UserInputState.End then
-            IsDragging = false
-            ActiveTouch = nil
-        end
-    end)
 end
 
 Header.InputBegan:Connect(BeginWindowDrag)
@@ -201,7 +205,6 @@ local function CreateDragHandle(name, position, size)
         Position = position,
         Size = size,
         BackgroundTransparency = 1,
-        BackgroundColor3 = Theme.Accent,
         BorderSizePixel = 0,
         Text = "",
         AutoButtonColor = false,
@@ -211,7 +214,6 @@ local function CreateDragHandle(name, position, size)
     }, Main)
 
     handle.InputBegan:Connect(BeginWindowDrag)
-    return handle
 end
 
 CreateDragHandle(
@@ -232,16 +234,16 @@ CreateDragHandle(
     UDim2.new(1, 0, 0, DragBorderSize)
 )
 
+-- One global movement listener and one release listener.
+-- No new global connections are created on each drag attempt.
 local DragInputConnection = UserInputService.InputChanged:Connect(function(input)
-    if IsClosed or not IsDragging then
-        return
-    end
+    if IsClosed or not IsDragging then return end
 
     local isMouseMove = input.UserInputType == Enum.UserInputType.MouseMovement
-    local isActiveTouchMove = ActiveTouch ~= nil
-        and input == ActiveTouch
+    local isTouchMove = ActiveTouch ~= nil
+        and input.UserInputType == Enum.UserInputType.Touch
 
-    if isMouseMove or isActiveTouchMove then
+    if isMouseMove or isTouchMove then
         local delta = input.Position - DragStart
         Main.Position = UDim2.new(
             StartPosition.X.Scale,
@@ -252,7 +254,14 @@ local DragInputConnection = UserInputService.InputChanged:Connect(function(input
     end
 end)
 
---==================================================
+local DragEndConnection = UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or (ActiveTouch ~= nil and input == ActiveTouch) then
+        IsDragging = false
+        ActiveTouch = nil
+    end
+end)
+
 -- [07] BODY CONTAINER
 --==================================================
 
@@ -323,9 +332,6 @@ local Hub = {}
 -- Setiap modul fitur wajib mendaftarkan cleanup agar prosesnya
 -- ikut dihentikan saat tombol CLOSE ditekan.
 --==================================================
-
-local IsClosed = false
-local CleanupCallbacks = {}
 
 function Hub.IsClosing()
     return IsClosed
@@ -530,6 +536,11 @@ local function CloseHub()
         DragInputConnection = nil
     end
 
+    if DragEndConnection then
+        DragEndConnection:Disconnect()
+        DragEndConnection = nil
+    end
+
     if _G.GrowBloxHub == Hub then
         _G.GrowBloxHub = nil
     end
@@ -538,6 +549,7 @@ local function CloseHub()
 end
 
 CloseButton.Activated:Connect(CloseHub)
+Hub.Close = CloseHub
 
 --==================================================
 -- [13] MODULE BRIDGE
@@ -545,4 +557,4 @@ CloseButton.Activated:Connect(CloseHub)
 
 _G.GrowBloxHub = Hub
 
-print("[GrowBlox Hub] UI Foundation V2 loaded.")
+print("[GrowBlox Hub] Optimized UI Foundation loaded.")
