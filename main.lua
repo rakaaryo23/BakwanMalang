@@ -103,7 +103,8 @@ AddStroke(Main, Theme.Accent, 0.2)
 
 -- Keep the window compact on different screen sizes.
 Create("UISizeConstraint", {
-    MinSize = Vector2.new(300, 48),
+    -- Allow the minimized window to shrink to the small square button.
+    MinSize = Vector2.new(34, 34),
     MaxSize = Vector2.new(900, 620),
 }, Main)
 
