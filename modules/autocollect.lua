@@ -10,6 +10,7 @@ return function(Hub)
         local VIM = game:GetService("VirtualInputManager")
         local player = Players.LocalPlayer
         local running = false
+        local status -- declared before notify() so the function updates this UI label
 
         local function raw(t, k)
             if type(t) ~= "table" then return nil end
@@ -87,15 +88,20 @@ return function(Hub)
         end
 
         local function notify(msg)
-            status.Text = tostring(msg)
+            msg = tostring(msg)
+            if status then
+                pcall(function()
+                    status.Text = msg
+                end)
+            end
             pcall(function()
                 game:GetService("StarterGui"):SetCore("SendNotification", {
                     Title = "Collect Experiment",
-                    Text = tostring(msg),
-                    Duration = 6
+                    Text = msg,
+                    Duration = 8
                 })
             end)
-            print("[Collect Experiment] " .. tostring(msg))
+            print("[Collect Experiment] " .. msg)
         end
 
         local function make(class, props, parent)
@@ -105,15 +111,16 @@ return function(Hub)
             return obj
         end
 
-        local status = make("TextLabel", {
+        status = make("TextLabel", {
             Name = "CollectExperimentStatus",
-            Position = UDim2.fromOffset(0, 4),
-            Size = UDim2.new(1, -12, 0, 54),
-            BackgroundTransparency = 1,
-            Text = "Siapkan 1 drop tepat di atas player, lalu tekan TEST.",
-            TextColor3 = Color3.fromRGB(220, 225, 235),
+            Position = UDim2.fromOffset(4, 4),
+            Size = UDim2.new(1, -8, 0, 76),
+            BackgroundColor3 = Color3.fromRGB(28, 32, 42),
+            BackgroundTransparency = 0.08,
+            Text = "STATUS: SIAP\\nSiapkan 1 drop tepat di atas player, lalu tekan TEST.",
+            TextColor3 = Color3.fromRGB(245, 245, 245),
             Font = Enum.Font.Gotham,
-            TextSize = 12,
+            TextSize = 13,
             TextWrapped = true,
             TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Center,
@@ -121,8 +128,8 @@ return function(Hub)
 
         local testButton = make("TextButton", {
             Name = "TestOneDropAbovePlayer",
-            Position = UDim2.fromOffset(0, 62),
-            Size = UDim2.fromOffset(220, 38),
+            Position = UDim2.fromOffset(4, 88),
+            Size = UDim2.new(1, -8, 0, 46),
             BackgroundColor3 = Color3.fromRGB(35, 145, 92),
             BorderSizePixel = 0,
             Text = "TEST 1 DROP DI ATAS PLAYER",
@@ -136,8 +143,16 @@ return function(Hub)
         buttonCorner.Parent = testButton
 
         local function runOneDropTest()
-            if running then return end
+            if running then
+                notify("TEST MASIH BERJALAN. Tunggu hasil sebelumnya.")
+                return
+            end
             running = true
+            -- Immediate UI acknowledgement: confirms the tap callback fired.
+            notify("TOMBOL TERTEKAN. Memeriksa referensi game...")
+            testButton.Text = "SEDANG MENGUJI..."
+            testButton.Active = false
+            testButton.AutoButtonColor = false
 
             task.spawn(function()
                 local ok, result = pcall(function()
@@ -222,6 +237,9 @@ return function(Hub)
                 end)
 
                 running = false
+                testButton.Text = "TEST 1 DROP DI ATAS PLAYER"
+                testButton.Active = true
+                testButton.AutoButtonColor = true
                 if ok then
                     notify(result)
                 else
@@ -230,7 +248,10 @@ return function(Hub)
             end)
         end
 
-        testButton.MouseButton1Click:Connect(runOneDropTest)
+        testButton.Active = true
+        testButton.Selectable = true
+        testButton.ZIndex = 20
+        status.ZIndex = 20
+        testButton.Activated:Connect(runOneDropTest)
     end)
 end
-
