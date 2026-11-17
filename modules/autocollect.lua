@@ -11,6 +11,12 @@ return function(Hub)
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
         local LocalPlayer = Players.LocalPlayer
 
+        -- k.lua: fallback remote untuk versi game lama.
+        local function getTakeDropRemote()
+            local folder = ReplicatedStorage:FindFirstChild("WorldRemotes")
+            return folder and folder:FindFirstChild("TakeDrop") or nil
+        end
+
         local destroyed, running = false, false
         local connections = {}
         local refs = { Inv = nil, World = nil, State = nil }
@@ -276,23 +282,40 @@ return function(Hub)
 
         -- Fungsi takeDrop mengikuti k(5).lua; counter/UI statistik utama tidak
         -- disertakan karena modul ini berdiri sendiri dan tidak berbagi State/Stats utama.
+        -- Jalur takeDrop mengikuti k(5).lua:
+        -- World.takeDrop(uid, amount) untuk game baru,
+        -- WorldRemotes.TakeDrop:InvokeServer(uid, amount) untuk game lama.
         local function takeDrop(d)
             local worldTake = refs.World and rawget(refs.World, "takeDrop")
-            if type(worldTake) ~= "function" then return false end
-            if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
-            if d.armed == false and d.id ~= 112 then return false end
+            local takeDropRemote = getTakeDropRemote()
+
+            if type(worldTake) ~= "function" and not takeDropRemote then
+                return false, "fungsi takeDrop dan Remote TakeDrop tidak ditemukan"
+            end
+            if d.taking or d.pending or d.display or (d.n or 0) <= 0 then
+                return false, "drop sedang diproses / kosong"
+            end
+            if d.armed == false and d.id ~= 112 then
+                return false, "drop belum armed"
+            end
 
             local now = os.clock()
-            if DropFailUntil[d.uid] and now < DropFailUntil[d.uid] then return false end
+            if DropFailUntil[d.uid] and now < DropFailUntil[d.uid] then
+                return false, "UID masih dalam cooldown"
+            end
 
             local amount = d.n
             if d.id ~= 112 and refs.Inv then
-                local okr, room = pcall(function() return refs.Inv:room(d.id) end)
-                if okr and type(room) == "number" then amount = math.min(amount, room) end
+                local okr, room = pcall(function()
+                    return refs.Inv:room(d.id)
+                end)
+                if okr and type(room) == "number" then
+                    amount = math.min(amount, room)
+                end
             end
             if amount <= 0 then
                 DropFailUntil[d.uid] = now + 1
-                return false
+                return false, "inventory penuh / room 0"
             end
 
             d.taking = true
@@ -300,7 +323,12 @@ return function(Hub)
                 pcall(function() d.frame.Visible = false end)
             end
 
-            local ok, taken = pcall(worldTake, d.uid, amount)
+            local ok, taken
+            if type(worldTake) == "function" then
+                ok, taken = pcall(worldTake, d.uid, amount)
+            else
+                ok, taken = pcall(takeDropRemote.InvokeServer, takeDropRemote, d.uid, amount)
+            end
             d.taking = false
 
             if not (ok and type(taken) == "number" and taken > 0) then
@@ -311,15 +339,32 @@ return function(Hub)
                 if typeof(d.frame) == "Instance" then
                     pcall(function() d.frame.Visible = not d.culled end)
                 end
-                return false
+                local why = not ok and ("Remote error: " .. tostring(taken))
+                    or ("server returned " .. tostring(taken))
+                return false, why
             end
 
             DropFailUntil[d.uid] = nil
-            if d.id ~= 112 and refs.Inv then
+            if d.id == 112 then
+                -- Gems dikelola oleh game; jangan tambahkan sebagai inventory item biasa.
+            elseif refs.Inv then
                 pcall(function() refs.Inv:add(d.id, taken) end)
             end
-            Drops.applyTaken(d, math.max(0, (d.n or 0) - taken))
-            return true
+
+            local left = math.max(0, (d.n or 0) - taken)
+            Drops.applyTaken(d, left)
+
+            -- Verifikasi lokal setelah update. Jangan menyamakan animasi hide dengan sukses.
+            local stillListed = Drops.list and table.find(Drops.list, d) ~= nil
+            if left <= 0 and stillListed then
+                -- Paksa sinkronisasi dengan updater game yang sama seperti k.lua.
+                Drops.update = nil
+                if Drops.findUpdate() then
+                    pcall(Drops.update, d, 0)
+                end
+            end
+
+            return true, ("server accepted %d; left %d"):format(taken, left)
         end
 
         -- Batas tile persis dari inTile() k(5).lua.
@@ -348,6 +393,9 @@ return function(Hub)
                     if Drops.list ~= list then
                         Drops.list = list
                         Drops.update = nil
+                        Drops.findUpdate()
+                    elseif not Drops.update then
+                        Drops.findUpdate()
                     end
                 end
             end
@@ -423,18 +471,18 @@ return function(Hub)
 
                             if found then
                                 -- Panggilan langsung dan tunggu hasilnya sebelum scan berikut.
-                                local ok, result = pcall(takeDrop, found)
+                                local ok, result, detail = pcall(takeDrop, found)
                                 if not ok then
                                     setStatus("Status: error take UID " ..
                                         tostring(found.uid) .. " - " .. tostring(result))
                                     task.wait(0.2)
                                 elseif result then
-                                    setStatus(("Status: tile (%d,%d) | UID %s diambil")
-                                        :format(offset.dx, offset.dy, tostring(found.uid)))
+                                    setStatus(("Status: tile (%d,%d) | UID %s | %s")
+                                        :format(offset.dx, offset.dy, tostring(found.uid), tostring(detail)))
                                     task.wait(0.1)
                                 else
-                                    -- Jika ditolak/cooldown, jangan pindah tile.
-                                    -- Scan ulang tile ini setelah jeda singkat.
+                                    setStatus(("Status: UID %s tidak terambil | %s")
+                                        :format(tostring(found.uid), tostring(detail)))
                                     task.wait(0.15)
                                 end
                             elseif tileHasDrops then
