@@ -129,7 +129,7 @@ local putDelayBox = delayBox("Jeda antar PUT", 80, 12, 438)
 local breakDelayBox = delayBox("Jeda antar HIT BREAK", 140, 190, 438)
 local breakStartBox = delayBox("Jeda awal sebelum BREAK", 150, 12, 492)
 local cycleDelayBox = delayBox("Jeda sebelum siklus ulang", 150, 190, 492)
-label("Pilih item lalu LOCK. Jangan bergerak/ganti selected saat loop berjalan.", 548, 28, 9)
+label("Pilih item lalu LOCK. Selected boleh berubah setelah item di-lock.", 548, 28, 9)
 gui.Parent = parent
 
 local running = false
@@ -550,11 +550,6 @@ startBtn.MouseButton1Click:Connect(function()
         return
     end
     if not confirmedId then report("Pilih item di inventory lalu LOCK SELECTED.") return end
-    if selectedId() ~= confirmedId then
-        report("Selected inventory berubah. LOCK SELECTED ulang.")
-        return
-    end
-
     local putMs, e1 = readDelay(putDelayBox, 80, 0, 10000)
     local hitMs, e2 = readDelay(breakDelayBox, 140, 1, 10000)
     local startMs, e3 = readDelay(breakStartBox, 150, 50, 10000)
@@ -591,12 +586,6 @@ startBtn.MouseButton1Click:Connect(function()
                     report("STOP AMAN: posisi player berubah dari anchor.")
                     break
                 end
-                if selectedId() ~= confirmedId then
-                    running = false
-                    report("STOP AMAN: selected item inventory berubah.")
-                    break
-                end
-
                 local currentFg = tileAt("fg", p.x, p.y)
                 local currentBg = tileAt("bg", p.x, p.y)
 
@@ -665,12 +654,6 @@ startBtn.MouseButton1Click:Connect(function()
                     report("STOP AMAN: posisi player berubah dari anchor.")
                     break
                 end
-                if selectedId() ~= confirmedId then
-                    running = false
-                    report("STOP AMAN: selected item inventory berubah.")
-                    break
-                end
-
                 local broken, breakMsg = breakOne(p.x, p.y, confirmedId, startMs, hitMs)
                 report(("SIKLUS %d | BREAK %d/%d %s (%d,%d): %s"):format(
                     cycle, index, #breakQueue, broken and "OK" or "GAGAL",
