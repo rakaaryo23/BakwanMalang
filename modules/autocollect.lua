@@ -76,7 +76,7 @@ return function(Hub)
     }, page)
 
     statusLabel = makeLabel(
-        "STATUS: SIAP. Berdiri tepat di bawah satu drop, lalu tekan tombol.",
+        "STATUS: SIAP. Berdiri tepat di bawah satu drop, lalu tekan tombol. World discovery sudah disesuaikan dengan k(5).lua.",
         58
     )
     statusLabel.LayoutOrder = 1
@@ -95,41 +95,70 @@ return function(Hub)
         return nil
     end
 
+    local function getUpvalues(fn)
+        local out = {}
+        local dbg = debug
+        local all = dbg and dbg.getupvalues
+        if type(all) == "function" then
+            local ok, values = pcall(all, fn)
+            if ok and type(values) == "table" then return values end
+        end
+        local one = (dbg and dbg.getupvalue) or getupvalue
+        if type(one) == "function" then
+            for i = 1, 60 do
+                local ok, value = pcall(one, fn, i)
+                if not ok then break end
+                out[i] = value
+            end
+        end
+        return out
+    end
+
+    local function isWorldTable(value)
+        return type(value) == "table"
+            and type(raw(value, "fg")) == "table"
+            and type(raw(value, "bg")) == "table"
+            and type(raw(value, "w")) == "number"
+            and type(raw(value, "h")) == "number"
+            and raw(value, "spawn") ~= nil
+    end
+
+    local function isDropList(value)
+        if type(value) ~= "table" then return false end
+        local first = raw(value, 1)
+        if first == nil then return next(value) == nil end
+        return type(first) == "table"
+            and raw(first, "uid") ~= nil
+            and raw(first, "frame") ~= nil
+    end
+
     local function discoverWorldAndState()
         if type(getgc) ~= "function" then
-            return nil, nil, "getgc tidak tersedia"
+            return nil, nil, nil, "getgc tidak tersedia"
         end
 
         local ok, objects = pcall(getgc, true)
         if not ok or type(objects) ~= "table" then
-            return nil, nil, "getgc(true) gagal"
+            return nil, nil, nil, "getgc(true) gagal"
         end
 
         local world, stateFunction
         for _, obj in ipairs(objects) do
             if type(obj) == "table" then
-                if not world
-                    and type(raw(obj, "fg")) == "table"
-                    and type(raw(obj, "bg")) == "table"
-                    and type(raw(obj, "w")) == "number"
-                    and type(raw(obj, "h")) == "number"
-                    and raw(obj, "spawn") ~= nil
-                    and type(raw(obj, "dropList")) == "function" then
+                if not world and isWorldTable(obj) then
                     world = obj
                 end
 
                 if not stateFunction then
-                    for _, value in pairs(obj) do
-                        if type(value) == "function" then
-                            local good, state = pcall(value)
-                            if good and type(state) == "table"
-                                and type(state.x) == "number"
-                                and type(state.y) == "number"
-                                and state.facing ~= nil
-                                and state.vx ~= nil then
-                                stateFunction = value
-                                break
-                            end
+                    local candidate = raw(obj, "state")
+                    if type(candidate) == "function" then
+                        local stateOk, state = pcall(candidate)
+                        if stateOk and type(state) == "table"
+                            and type(state.x) == "number"
+                            and type(state.y) == "number"
+                            and state.facing ~= nil
+                            and state.vx ~= nil then
+                            stateFunction = candidate
                         end
                     end
                 end
@@ -137,9 +166,43 @@ return function(Hub)
             if world and stateFunction then break end
         end
 
-        if not world then return nil, nil, "World/dropList tidak ditemukan" end
-        if not stateFunction then return nil, nil, "Fungsi State tidak ditemukan" end
-        return world, stateFunction
+        if not world then
+            return nil, stateFunction, nil,
+                "World tidak ditemukan memakai kriteria asli k(5).lua (fg/bg/w/h/spawn)"
+        end
+        if not stateFunction then
+            return world, nil, nil, "Fungsi Refs.State tidak ditemukan"
+        end
+
+        -- k(5).lua tidak mewajibkan dropList menjadi field World saat menemukan World.
+        -- Daftar drop dicari terpisah, persis seperti findDropRefs().
+        local dropList
+        local dropListFn = raw(world, "dropList")
+        if type(dropListFn) == "function" then
+            local listOk, list = pcall(dropListFn)
+            if listOk and isDropList(list) then
+                dropList = list
+            end
+        end
+
+        if not dropList then
+            local dropTaken = raw(world, "dropTaken")
+            if type(dropTaken) == "function" then
+                for _, upvalue in pairs(getUpvalues(dropTaken)) do
+                    if isDropList(upvalue) then
+                        dropList = upvalue
+                        break
+                    end
+                end
+            end
+        end
+
+        if not dropList then
+            return world, stateFunction, nil,
+                "World dan State ditemukan, tetapi daftar drop belum ditemukan dari World.dropList/dropTaken. Ini berbeda dari error sebelumnya."
+        end
+
+        return world, stateFunction, dropList
     end
 
     local function inventorySnapshot()
@@ -178,15 +241,15 @@ return function(Hub)
 
         task.spawn(function()
             local ok, message = pcall(function()
-                local world, stateFunction, err = discoverWorldAndState()
-                assert(world and stateFunction, err or "Referensi tidak lengkap")
+                local world, stateFunction, dropList, err = discoverWorldAndState()
+                assert(world and stateFunction and dropList, err or "Referensi tidak lengkap")
 
                 local stateOk, state = pcall(stateFunction)
                 assert(stateOk and type(state) == "table", "Gagal membaca state player")
                 assert(type(state.x) == "number" and type(state.y) == "number", "Koordinat player tidak valid")
 
-                local listOk, drops = pcall(world.dropList)
-                assert(listOk and type(drops) == "table", "World.dropList gagal")
+                local drops = dropList
+                assert(type(drops) == "table", "Daftar drop tidak valid")
 
                 local target, bestScore
                 for _, drop in ipairs(drops) do
@@ -229,8 +292,8 @@ return function(Hub)
                 task.wait(1.5)
 
                 local stillThere, afterCount = false, nil
-                local freshOk, freshDrops = pcall(world.dropList)
-                if freshOk and type(freshDrops) == "table" then
+                local freshDrops = dropList
+                if type(freshDrops) == "table" then
                     for _, drop in ipairs(freshDrops) do
                         if type(drop) == "table" and drop.uid == uid then
                             stillThere = true
