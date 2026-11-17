@@ -147,41 +147,88 @@ AddCorner(MinimizeButton, 8)
 
 --==================================================
 -- [06] DRAG WINDOW
+-- Drag dapat dimulai dari header dan tiga sisi luar window.
 --==================================================
 
 local IsDragging = false
-local DragInput = nil
 local DragStart = nil
 local StartPosition = nil
+local ActiveDragInput = nil
 
-Header.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-
-        IsDragging = true
-        DragStart = input.Position
-        StartPosition = Main.Position
-
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then
-                IsDragging = false
-            end
-        end)
+local function BeginWindowDrag(input)
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
     end
-end)
 
-Header.InputChanged:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch then
-        DragInput = input
-    end
-end)
+    IsDragging = true
+    ActiveDragInput = input
+    DragStart = input.Position
+    StartPosition = Main.Position
+
+    input.Changed:Connect(function()
+        if input.UserInputState == Enum.UserInputState.End then
+            IsDragging = false
+            ActiveDragInput = nil
+        end
+    end)
+end
+
+local function ConnectDragHandle(handle)
+    handle.InputBegan:Connect(BeginWindowDrag)
+end
+
+ConnectDragHandle(Header)
+
+-- Drag strips: left, right, and bottom outer borders.
+local DragBorderSize = 9
+
+local LeftDragBorder = Create("Frame", {
+    Name = "LeftDragBorder",
+    Position = UDim2.fromOffset(0, 52),
+    Size = UDim2.new(0, DragBorderSize, 1, -52),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    Active = true,
+    ZIndex = 50,
+}, Main)
+
+local RightDragBorder = Create("Frame", {
+    Name = "RightDragBorder",
+    AnchorPoint = Vector2.new(1, 0),
+    Position = UDim2.new(1, 0, 0, 52),
+    Size = UDim2.new(0, DragBorderSize, 1, -52),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    Active = true,
+    ZIndex = 50,
+}, Main)
+
+local BottomDragBorder = Create("Frame", {
+    Name = "BottomDragBorder",
+    AnchorPoint = Vector2.new(0, 1),
+    Position = UDim2.new(0, 0, 1, 0),
+    Size = UDim2.new(1, 0, 0, DragBorderSize),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    Active = true,
+    ZIndex = 50,
+}, Main)
+
+ConnectDragHandle(LeftDragBorder)
+ConnectDragHandle(RightDragBorder)
+ConnectDragHandle(BottomDragBorder)
 
 UserInputService.InputChanged:Connect(function(input)
-    if IsDragging and (input == DragInput
-        or input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch) then
+    if not IsDragging then
+        return
+    end
 
+    local isMouseMove = input.UserInputType == Enum.UserInputType.MouseMovement
+    local isTouchMove = input.UserInputType == Enum.UserInputType.Touch
+        and ActiveDragInput ~= nil
+
+    if isMouseMove or isTouchMove then
         local delta = input.Position - DragStart
         Main.Position = UDim2.new(
             StartPosition.X.Scale,
