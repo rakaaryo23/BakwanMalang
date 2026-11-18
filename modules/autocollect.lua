@@ -1,6 +1,6 @@
 --==================================================
--- MODULE: AUTO COLLECT 5x5 REMOTE (GROWBLOX HUB)
--- Menggunakan mekanisme remote ala k.lua dengan area 5x5
+-- MODULE: AUTO COLLECT 5x5 REMOTE (V2 - WITH DISCOVERY)
+-- Sesuai struktur APB_2.lua & Mekanisme Remote k.lua
 --==================================================
 
 return function(Hub)
@@ -27,12 +27,13 @@ return function(Hub)
     local destroyed = false
 
     local refs = {
-        Inv = nil,
         World = nil,
         State = nil,
+        Drops = nil,
+        TakeFn = nil,
     }
 
-    -- Grid 5x5: key format "dx,dy", value true/false (Default semua aktif)
+    -- Grid 5x5: key format "dx,dy", value true/false
     local enabledTiles = {}
     for dx = -2, 2 do
         for dy = -2, 2 do
@@ -159,15 +160,19 @@ return function(Hub)
     tileButton = makeButton("PILIH TILE  |  25 TARGET AKTIF", 34)
     tileButton.LayoutOrder = 3
 
+    local scanButton = makeButton("SCAN ULANG REFERENCES", 32, page, Theme.PanelDark)
+    scanButton.TextColor3 = Theme.Text
+    scanButton.LayoutOrder = 4
+
     local startButton = makeButton("START AUTO COLLECT", 36, page, Theme.Green)
-    startButton.LayoutOrder = 4
+    startButton.LayoutOrder = 5
 
     local stopButton = makeButton("STOP", 32, page, Theme.Red)
-    stopButton.LayoutOrder = 5
+    stopButton.LayoutOrder = 6
 
     local settingsButton = makeButton("PENGATURAN DELAY  ▼", 30, page, Theme.PanelDark)
     settingsButton.TextColor3 = Theme.Text
-    settingsButton.LayoutOrder = 6
+    settingsButton.LayoutOrder = 7
 
     local settingsFrame = create("Frame", {
         Size = UDim2.new(1, 0, 0, 0),
@@ -175,7 +180,7 @@ return function(Hub)
         BackgroundColor3 = Theme.Panel,
         BorderSizePixel = 0,
         Visible = false,
-        LayoutOrder = 7,
+        LayoutOrder = 8,
     }, page)
     corner(settingsFrame, 8)
 
@@ -191,7 +196,6 @@ return function(Hub)
         SortOrder = Enum.SortOrder.LayoutOrder,
     }, settingsFrame)
 
-    -- Delay default ala k.lua (0.05s atau 50ms sebagai opsi standar cepat & stabil)
     local collectDelayBox = makeDelayBox("Jeda antar Collect (ms)", 50, settingsFrame)
 
     track(settingsButton.Activated:Connect(function()
@@ -230,12 +234,8 @@ return function(Hub)
 
     local function openPopup()
         if destroyed or popup then return end
-
         local screenGui = Hub.GetGui()
-        if not screenGui then
-            report("ScreenGui Hub tidak ditemukan.")
-            return
-        end
+        if not screenGui then return end
 
         popup = create("Frame", {
             Name = "AutoCollectPopup",
@@ -260,7 +260,6 @@ return function(Hub)
             ZIndex = 201,
         }, popup)
 
-        -- Tombol Close (Tanda Silang / X)
         local closeButton = create("TextButton", {
             AnchorPoint = Vector2.new(1, 0),
             Position = UDim2.new(1, -8, 0, 7),
@@ -348,7 +347,7 @@ return function(Hub)
     track(tileButton.Activated:Connect(openPopup))
 
     --==================================================
-    -- [E] DISCOVERY & GAME HELPERS (REMOTE MODE ALA K.LUA)
+    -- [E] DISCOVERY LOGIC (MENCARI DROPS & TAKE FUNCTION)
     --==================================================
 
     local function raw(t, k)
@@ -357,16 +356,33 @@ return function(Hub)
         return ok and value or nil
     end
 
+    local function findTakeFn(objects)
+        for _, fn in ipairs(objects) do
+            if type(fn) == "function" then
+                local okN, name = pcall(debug.info, fn, "n")
+                if okN and (name == "take" or name == "takeDrop" or name == "worldTake") then
+                    return fn
+                end
+            end
+        end
+        return rawget(_G, "worldTake") or (getgenv and rawget(getgenv(), "worldTake"))
+    end
+
     local function discover()
-        local ok, objects = pcall(getgc, true)
-        if not ok or type(objects) ~= "table" then
-            return false, "getgc gagal"
+        if type(getgc) ~= "function" then
+            return false, "Executor tidak mendukung getgc"
         end
 
-        refs.Inv, refs.World, refs.State = nil, nil, nil
+        local ok, objects = pcall(getgc, true)
+        if not ok or type(objects) ~= "table" then
+            return false, "getgc(true) gagal"
+        end
+
+        refs.World, refs.State, refs.Drops = nil, nil, nil
 
         for _, obj in ipairs(objects) do
             if type(obj) == "table" then
+                -- Cari World
                 if not refs.World
                     and type(raw(obj, "fg")) == "table"
                     and type(raw(obj, "bg")) == "table"
@@ -376,6 +392,7 @@ return function(Hub)
                     refs.World = obj
                 end
 
+                -- Cari State
                 if not refs.State then
                     local stateFn = raw(obj, "state")
                     if type(stateFn) == "function" then
@@ -387,10 +404,33 @@ return function(Hub)
                         end
                     end
                 end
+
+                -- Cari Drops container (table yang punya .list berisi item drop)
+                if not refs.Drops then
+                    local list = raw(obj, "list")
+                    if type(list) == "table" then
+                        for _, item in pairs(list) do
+                            if type(item) == "table" and raw(item, "x") and raw(item, "y") and (raw(item, "uid") or raw(item, "id")) then
+                                refs.Drops = obj
+                                break
+                            end
+                        end
+                    end
+                end
             end
         end
 
-        return true, "Scan Berhasil"
+        refs.TakeFn = findTakeFn(objects)
+
+        local missing = {}
+        if not refs.State then table.insert(missing, "State") end
+        if not refs.Drops and not (rawget(_G, "Drops") or (Drops and Drops.list)) then table.insert(missing, "Drops") end
+
+        if #missing > 0 then
+            return false, "Referensi belum lengkap: " .. table.concat(missing, ", ")
+        end
+
+        return true, "Scan Berhasil (State & Drops ditemukan)"
     end
 
     local function playerTile()
@@ -402,9 +442,37 @@ return function(Hub)
         return math.floor(state.x), math.floor(state.y - 0.475)
     end
 
+    local function getDropsList()
+        if refs.Drops and type(raw(refs.Drops, "list")) == "table" then
+            return refs.Drops.list
+        end
+        if rawget(_G, "Drops") and type(_G.Drops.list) == "table" then
+            return _G.Drops.list
+        end
+        if getgenv and getgenv().Drops and type(getgenv().Drops.list) == "table" then
+            return getgenv().Drops.list
+        end
+        if Drops and type(Drops.list) == "table" then
+            return Drops.list
+        end
+        return nil
+    end
+
     --==================================================
-    -- [F] BUTTON EVENTS & LOOP UTAMA (REMOTE COLLECTION)
+    -- [F] BUTTON EVENTS & LOOP UTAMA
     --==================================================
+
+    track(scanButton.Activated:Connect(function()
+        if running then
+            report("Stop proses sebelum scan ulang.")
+            return
+        end
+        task.spawn(function()
+            report("Memindai environment...")
+            local ok, msg = discover()
+            report(ok and msg or ("SCAN GAGAL: " .. msg))
+        end)
+    end))
 
     track(stopButton.Activated:Connect(function()
         running = false
@@ -414,7 +482,11 @@ return function(Hub)
     track(startButton.Activated:Connect(function()
         if running then return end
 
-        discover()
+        local okScan, msgScan = discover()
+        if not okScan and not getDropsList() then
+            report("Gagal Start: " .. msgScan)
+            return
+        end
 
         local delayMs = tonumber(collectDelayBox.Text)
         if not delayMs or delayMs < 0 then
@@ -436,38 +508,39 @@ return function(Hub)
                 end
 
                 local success, err = pcall(function()
-                    -- Ambil daftar global drop di game (Drops.list)
-                    local dropsList = rawget(_G, "Drops") and rawget(_G, "Drops").list 
-                        or (getgenv and rawget(getgenv(), "Drops") and getgenv().Drops.list)
-                        or (Drops and Drops.list)
-
+                    local dropsList = getDropsList()
                     if type(dropsList) == "table" then
                         for _, drop in ipairs(dropsList) do
-                            if drop and drop.x and drop.y and drop.uid then
-                                local dx = drop.x - px
-                                local dy = drop.y - py
+                            if drop and drop.x and drop.y then
+                                local uid = drop.uid or drop.id
+                                if uid then
+                                    local dx = drop.x - px
+                                    local dy = drop.y - py
 
-                                -- Cek apakah masuk dalam area 5x5 (-2 s/d 2) dan aktif di menu popup
-                                if dx >= -2 and dx <= 2 and dy >= -2 and dy <= 2 then
-                                    local key = dx .. "," .. dy
-                                    if enabledTiles[key] ~= false then
-                                        -- Eksekusi Remote Mode ala k.lua secara instan / paralel
-                                        task.spawn(function()
-                                            if worldTake then
-                                                pcall(worldTake, drop.uid, drop.amount or 1)
-                                            elseif TakeDropRemote then
-                                                pcall(function() TakeDropRemote:InvokeServer(drop.uid, drop.amount or 1) end)
-                                            end
-                                        end)
+                                    if dx >= -2 and dx <= 2 and dy >= -2 and dy <= 2 then
+                                        local key = dx .. "," .. dy
+                                        if enabledTiles[key] ~= false then
+                                            task.spawn(function()
+                                                if refs.TakeFn and type(refs.TakeFn) == "function" then
+                                                    pcall(refs.TakeFn, uid, drop.amount or 1)
+                                                elseif worldTake then
+                                                    pcall(worldTake, uid, drop.amount or 1)
+                                                elseif TakeDropRemote then
+                                                    pcall(function() TakeDropRemote:InvokeServer(uid, drop.amount or 1) end)
+                                                end
+                                            end)
+                                        end
                                     end
                                 end
                             end
                         end
+                    else
+                        report("STATUS: Error - Drops.list tidak ditemukan!")
                     end
                 end)
 
                 if not success then
-                    report("Error saat collect: " .. tostring(err))
+                    report("STATUS: Error - " .. tostring(err))
                 end
 
                 task.wait(delayMs / 1000)
@@ -490,7 +563,7 @@ return function(Hub)
 
         for _, connection in ipairs(connections) do
             pcall(function()
-                connection:Disconnect()
+                connection:Destroy or connection:Disconnect()
             end)
         end
         table.clear(connections)
@@ -499,7 +572,15 @@ return function(Hub)
     Hub.RegisterCleanup(cleanup)
     updateTileButton()
 
-    print("[AutoCollect] Module loaded successfully.")
+    -- Auto discover saat pertama buka tab
+    task.spawn(function()
+        task.wait(0.3)
+        if not destroyed and not Hub.IsClosing() then
+            discover()
+        end
+    end)
+
+    print("[AutoCollect V2] Module loaded successfully.")
 
     end)
 
