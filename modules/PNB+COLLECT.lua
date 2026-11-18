@@ -877,15 +877,18 @@ return function(Hub)
             else
                 local found = dropsAtTarget(target)
                 if #found == 0 then
-                    -- Pastikan daftar drop tetap kosong pada beberapa pembacaan.
-                    local stable = true
-                    -- Tunggu 1.6 detik tanpa drop agar item yang muncul
-                    -- sedikit terlambat setelah BREAK tidak terlewat.
-                    for _ = 1, 8 do
-                        task.wait(0.2)
-                        if #dropsAtTarget(target) > 0 then stable = false; break end
-                    end
-                    if stable then return true, "tile bersih; tidak ada drop tersisa" end
+-- Validasi tile kosong selama 0.4 detik.
+local stable = true
+for _ = 1, 2 do
+    task.wait(0.2)
+    if #dropsAtTarget(target) > 0 then
+        stable = false
+        break
+    end
+end
+if stable then
+    return true, "tile bersih; tidak ada drop tersisa"
+end
                 else
                     for _, drop in ipairs(found) do
                         if not running or destroyed or Hub.IsClosing() then
