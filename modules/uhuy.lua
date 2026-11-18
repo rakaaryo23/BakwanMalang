@@ -16,7 +16,13 @@ return function(Hub)
         local refs = { Inv = nil, World = nil, State = nil }
         local Drops = { list = nil, update = nil, nextScan = 0 }
         local DropFailUntil = {}
-        local enabled = {}
+        -- Grid 5x5: hanya titik 7, 8, dan 9 yang aktif.
+        -- Dengan player di titik 13, ketiganya adalah dx=-1..1, dy=-1.
+        local enabled = {
+            ["-1,-1"] = true,
+            ["0,-1"] = true,
+            ["1,-1"] = true,
+        }
         local popup
 
         local Theme = {
@@ -419,7 +425,7 @@ end
 
 ---------------------------------------------------------------------
 -- REMOTE COLLECTOR
--- Mengambil seluruh drop pada tile aktif secara paralel.
+-- Hanya memeriksa titik 7, 8, dan 9 relatif terhadap Player State.
 ---------------------------------------------------------------------
 
 local function remoteTick()
@@ -502,7 +508,7 @@ end
             Size = UDim2.fromOffset(190, 34),
             BackgroundColor3 = Theme.PanelDark,
             BorderSizePixel = 0,
-            Text = "PILIH TILE (0 AKTIF)",
+            Text = "TITIK 7-9 (3/3 AKTIF)",
             TextColor3 = Theme.Text,
             Font = Enum.Font.GothamBold,
             TextSize = 11,
@@ -528,7 +534,7 @@ end
         end
 
         local function updateTileButton()
-            tileButton.Text = ("PILIH TILE (%d AKTIF)"):format(activeCount())
+            tileButton.Text = ("TITIK 7-9 (%d/3 AKTIF)"):format(activeCount())
         end
 
         local function closePopup()
@@ -558,7 +564,7 @@ end
                 Position = UDim2.fromOffset(10, 5),
                 Size = UDim2.new(1, -50, 0, 28),
                 BackgroundTransparency = 1,
-                Text = "PILIH TILE TARGET (5 x 5)",
+                Text = "TITIK AKTIF: 7, 8, 9",
                 TextColor3 = Theme.Text,
                 Font = Enum.Font.GothamBold,
                 TextSize = 12,
@@ -595,11 +601,14 @@ end
             for dy = -2, 2 do
                 for dx = -2, 2 do
                     local key = dx .. "," .. dy
-                    if enabled[key] == nil then enabled[key] = true end
+                    local allowed = (dy == -1 and dx >= -1 and dx <= 1)
+                    if enabled[key] == nil then enabled[key] = false end
                     local b = create("TextButton", {
                         BackgroundColor3 = enabled[key] and Theme.Green or Theme.PanelDark,
                         BorderSizePixel = 0,
-                        Text = (dx == 0 and dy == 0) and "YOU" or (enabled[key] and "ON" or "OFF"),
+                        Text = (dy == 0 and dx == 0) and "YOU"
+                            or (enabled[key] and "ON" or (allowed and "OFF" or "-")),
+                        AutoButtonColor = allowed,
                         TextColor3 = Theme.White,
                         Font = Enum.Font.GothamBold,
                         TextSize = 10,
@@ -607,10 +616,9 @@ end
                     }, grid)
                     corner(b, 6)
                     track(b.Activated:Connect(function()
-                        if destroyed then return end
+                        if destroyed or not allowed then return end
                         enabled[key] = not enabled[key]
-                        b.Text = (dx == 0 and dy == 0) and (enabled[key] and "YOU ON" or "YOU OFF")
-                            or (enabled[key] and "ON" or "OFF")
+                        b.Text = enabled[key] and "ON" or "OFF"
                         b.BackgroundColor3 = enabled[key] and Theme.Green or Theme.PanelDark
                         updateTileButton()
                     end))
@@ -627,7 +635,7 @@ end
             toggle.Text = running and "STOP" or "START"
             toggle.BackgroundColor3 = running and Theme.Red or Theme.Green
             if running then
-                status.Text = "Status: aktif | Remote | radius tile 2"
+                status.Text = "Status: aktif | Remote | titik 7, 8, 9"
             else
                 status.Text = "Status: berhenti"
             end
@@ -637,7 +645,7 @@ end
             if destroyed then return end
             if not running then
                 if activeCount() == 0 then
-                    status.Text = "Status: pilih minimal satu tile"
+                    status.Text = "Status: aktifkan minimal satu dari titik 7, 8, 9"
                     return
                 end
                 if not refs.World or not refs.Inv or not refs.State then
