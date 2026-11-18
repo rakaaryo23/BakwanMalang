@@ -355,3 +355,4 @@ return function(Hub)
         append("Module V2 aktif. Posisi dibaca melalui state() internal GrowBlox seperti APB V4. Pastikan inventory awal item ID 3 terlihat sebelum mulai.")
     end)
 end
+ 
