@@ -30,6 +30,7 @@ return function(Hub)
         local recordStarted = 0
         local lastSample = 0
         local lastPosition
+        local stateRef
         local lastInventoryCount
         local inventoryRef
         local ITEM_ID = 3
@@ -135,20 +136,48 @@ return function(Hub)
             return total
         end
 
+        -- GrowBlox tidak selalu memakai Character/HumanoidRootPart Roblox standar.
+        -- APB V4 menemukan state player melalui tabel GC yang memiliki state() -> {x,y,facing,vx,...}.
+        local function findGameState()
+            stateRef = nil
+            if type(getgc) ~= "function" then return nil, "getgc tidak tersedia" end
+            local ok, objects = pcall(getgc, true)
+            if not ok or type(objects) ~= "table" then
+                return nil, "getgc(true) gagal"
+            end
+            for _, obj in ipairs(objects) do
+                if type(obj) == "table" then
+                    local candidate = raw(obj, "state")
+                    if type(candidate) == "function" then
+                        local good, state = pcall(candidate)
+                        if good and type(state) == "table"
+                            and type(state.x) == "number"
+                            and type(state.y) == "number"
+                            and state.facing ~= nil and state.vx ~= nil then
+                            stateRef = candidate
+                            return stateRef, "state() GrowBlox ditemukan"
+                        end
+                    end
+                end
+            end
+            return nil, "fungsi state() GrowBlox tidak ditemukan"
+        end
+
         local function getCharacterState()
-            local character = LocalPlayer and LocalPlayer.Character
-            if not character then return nil end
-            local root = character:FindFirstChild("HumanoidRootPart")
-            local humanoid = character:FindFirstChildOfClass("Humanoid")
-            if not root then return nil end
-            local p, v = root.Position, root.AssemblyLinearVelocity
-            local move = humanoid and humanoid.MoveDirection or Vector3.zero
-            local state = humanoid and safeString(humanoid:GetState()) or "?"
+            if not stateRef then return nil end
+            local ok, state = pcall(stateRef)
+            if not ok or type(state) ~= "table"
+                or type(state.x) ~= "number"
+                or type(state.y) ~= "number" then
+                return nil
+            end
+            if state.active == false then return nil end
             return {
-                x = p.X, y = p.Y, z = p.Z,
-                vx = v.X, vy = v.Y, vz = v.Z,
-                mx = move.X, my = move.Y, mz = move.Z,
-                state = state,
+                x = state.x, y = state.y,
+                vx = tonumber(state.vx) or 0,
+                vy = tonumber(state.vy) or 0,
+                facing = safeString(state.facing),
+                active = safeString(state.active),
             }
         end
 
@@ -158,20 +187,21 @@ return function(Hub)
 
         local function recordMovement(state)
             if not state then
-                append("PLAYER unavailable (character/root belum ditemukan)")
+                append("PLAYER STATE unavailable (state() GrowBlox belum terbaca)")
                 return
             end
-            local p = Vector3.new(state.x, state.y, state.z)
             if not lastPosition then
-                append(("POS awal X=%.2f Y=%.2f Z=%.2f | Humanoid=%s"):format(state.x, state.y, state.z, state.state))
+                append(("POS awal tile/world X=%.3f Y=%.3f | VEL %.3f, %.3f | facing=%s")
+                    :format(state.x, state.y, state.vx, state.vy, state.facing))
             else
-                local distance = (p - lastPosition).Magnitude
-                if distance >= 0.035 then
-                    append(("MOVE Δ=%.3f | POS %.2f, %.2f, %.2f | VEL %.2f, %.2f, %.2f | Humanoid=%s")
-                        :format(distance, state.x, state.y, state.z, state.vx, state.vy, state.vz, state.state))
+                local dx, dy = state.x - lastPosition.x, state.y - lastPosition.y
+                local distance = math.sqrt(dx * dx + dy * dy)
+                if distance >= 0.003 then
+                    append(("MOVE Δ=%.4f | POS %.3f, %.3f | ΔX=%.4f ΔY=%.4f | VEL %.3f, %.3f | facing=%s")
+                        :format(distance, state.x, state.y, dx, dy, state.vx, state.vy, state.facing))
                 end
             end
-            lastPosition = p
+            lastPosition = {x = state.x, y = state.y}
         end
 
         local function stopRecording(reason)
@@ -192,6 +222,9 @@ return function(Hub)
             lastSample = 0
             lastPosition = nil
             inventoryRef = nil
+            local foundState, stateMessage = findGameState()
+            append("PLAYER SCAN: " .. stateMessage)
+            lastPosition = nil
             lastInventoryCount = countItem3()
             recording = true
             setStatus("RECORDING - ambil 1 Dirt Seed (ID 3)", Theme.Green)
@@ -205,7 +238,7 @@ return function(Hub)
         local layout = create("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, page)
         local intro = create("TextLabel", {
             Size = UDim2.new(1, 0, 0, 55), BackgroundTransparency = 1,
-            Text = "ACTION RECORDER | Rekam posisi/pergerakan player, input klik/tap, dan perubahan jumlah Dirt Seed ID 3. READ-ONLY: tidak mengirim remote atau menjalankan fungsi collect.",
+            Text = "ACTION RECORDER V2 | Membaca state() internal GrowBlox (bukan HumanoidRootPart), input klik/tap, dan perubahan jumlah Dirt Seed ID 3. READ-ONLY.",
             TextColor3 = Theme.Text, Font = Enum.Font.Gotham, TextSize = 10,
             TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Center,
@@ -248,7 +281,7 @@ return function(Hub)
 
         output = create("TextBox", {
             Size = UDim2.new(1, 0, 0, 300), BackgroundColor3 = Color3.fromRGB(255, 245, 248),
-            BorderSizePixel = 0, Text = "Siap. Tekan START RECORDING, ambil tepat 1 Dirt Seed (ID 3), lalu STOP dan COPY FEEDBACK.",
+            BorderSizePixel = 0, Text = "V2: Tekan START RECORDING, ambil tepat 1 Dirt Seed (ID 3), lalu STOP dan COPY FEEDBACK.",
             TextColor3 = Theme.Text, PlaceholderColor3 = Theme.Muted,
             Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = false,
@@ -319,6 +352,6 @@ return function(Hub)
             table.clear(connections)
         end
         Hub.RegisterCleanup(cleanup)
-        append("Module aktif. Pastikan inventory awal item ID 3 terlihat sebelum mulai.")
+        append("Module V2 aktif. Posisi dibaca melalui state() internal GrowBlox seperti APB V4. Pastikan inventory awal item ID 3 terlihat sebelum mulai.")
     end)
 end
