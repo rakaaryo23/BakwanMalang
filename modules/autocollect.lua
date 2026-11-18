@@ -1,5 +1,5 @@
 --==================================================
--- MODULE: AUTO COLLECT 5x5 REMOTE (V2 - WITH DISCOVERY)
+-- MODULE: AUTO COLLECT 5x5 REMOTE (V2.1 - FIXED)
 -- Sesuai struktur APB_2.lua & Mekanisme Remote k.lua
 --==================================================
 
@@ -33,7 +33,6 @@ return function(Hub)
         TakeFn = nil,
     }
 
-    -- Grid 5x5: key format "dx,dy", value true/false
     local enabledTiles = {}
     for dx = -2, 2 do
         for dy = -2, 2 do
@@ -382,7 +381,6 @@ return function(Hub)
 
         for _, obj in ipairs(objects) do
             if type(obj) == "table" then
-                -- Cari World
                 if not refs.World
                     and type(raw(obj, "fg")) == "table"
                     and type(raw(obj, "bg")) == "table"
@@ -392,7 +390,6 @@ return function(Hub)
                     refs.World = obj
                 end
 
-                -- Cari State
                 if not refs.State then
                     local stateFn = raw(obj, "state")
                     if type(stateFn) == "function" then
@@ -405,7 +402,6 @@ return function(Hub)
                     end
                 end
 
-                -- Cari Drops container (table yang punya .list berisi item drop)
                 if not refs.Drops then
                     local list = raw(obj, "list")
                     if type(list) == "table" then
@@ -552,7 +548,7 @@ return function(Hub)
     end))
 
     --==================================================
-    -- [G] CLEANUP
+    -- [G] CLEANUP (FIXED SYNTAX)
     --==================================================
 
     local function cleanup()
@@ -563,7 +559,7 @@ return function(Hub)
 
         for _, connection in ipairs(connections) do
             pcall(function()
-                connection:Destroy or connection:Disconnect()
+                connection:Disconnect()
             end)
         end
         table.clear(connections)
@@ -572,7 +568,6 @@ return function(Hub)
     Hub.RegisterCleanup(cleanup)
     updateTileButton()
 
-    -- Auto discover saat pertama buka tab
     task.spawn(function()
         task.wait(0.3)
         if not destroyed and not Hub.IsClosing() then
@@ -580,7 +575,7 @@ return function(Hub)
         end
     end)
 
-    print("[AutoCollect V2] Module loaded successfully.")
+    print("[AutoCollect V2.1] Module loaded successfully.")
 
     end)
 
