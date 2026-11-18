@@ -1,6 +1,6 @@
 --==================================================
--- MODULE: AUTO COLLECT 5x5 REMOTE (GROWBLOX HUB)
--- Disamakan 100% dengan struktur & pola APB_2.lua
+-- MODULE: AUTO COLLECT 5x5 REMOTE (GROWBLOX HUB - FIXED & WORKING)
+-- Berbasis kode yang sukses ter-load, ditambah penemuan Drops & Take via getgc
 --==================================================
 
 return function(Hub)
@@ -27,16 +27,21 @@ return function(Hub)
     local destroyed = false
 
     local refs = {
-        World = nil,
         State = nil,
-        Drops = nil,
+        DropsContainer = nil,
         TakeFn = nil,
     }
 
-    local enabled = {}
+    -- Grid 5x5: key format "dx,dy", value true/false (Default semua aktif)
+    local enabledTiles = {}
+    for dx = -2, 2 do
+        for dy = -2, 2 do
+            enabledTiles[dx .. "," .. dy] = true
+        end
+    end
+
     local connections = {}
     local popup = nil
-
     local statusLabel
     local tileButton
 
@@ -145,28 +150,24 @@ return function(Hub)
         SortOrder = Enum.SortOrder.LayoutOrder,
     }, page)
 
-    statusLabel = makeLabel("Status: menyiapkan scan...", 34)
+    statusLabel = makeLabel("Status: siap", 34)
     statusLabel.LayoutOrder = 1
 
-    local areaLabel = makeLabel("Area target: 5 x 5 | Player berada di tengah", 24)
+    local areaLabel = makeLabel("Area target: 5 x 5 (Termasuk player di tengah)", 24)
     areaLabel.LayoutOrder = 2
 
     tileButton = makeButton("PILIH TILE  |  25 TARGET AKTIF", 34)
     tileButton.LayoutOrder = 3
 
-    local scanButton = makeButton("SCAN ULANG", 32, page, Theme.PanelDark)
-    scanButton.TextColor3 = Theme.Text
-    scanButton.LayoutOrder = 4
-
     local startButton = makeButton("START AUTO COLLECT", 36, page, Theme.Green)
-    startButton.LayoutOrder = 5
+    startButton.LayoutOrder = 4
 
     local stopButton = makeButton("STOP", 32, page, Theme.Red)
-    stopButton.LayoutOrder = 6
+    stopButton.LayoutOrder = 5
 
     local settingsButton = makeButton("PENGATURAN DELAY  ▼", 30, page, Theme.PanelDark)
     settingsButton.TextColor3 = Theme.Text
-    settingsButton.LayoutOrder = 7
+    settingsButton.LayoutOrder = 6
 
     local settingsFrame = create("Frame", {
         Size = UDim2.new(1, 0, 0, 0),
@@ -174,7 +175,7 @@ return function(Hub)
         BackgroundColor3 = Theme.Panel,
         BorderSizePixel = 0,
         Visible = false,
-        LayoutOrder = 8,
+        LayoutOrder = 7,
     }, page)
     corner(settingsFrame, 8)
 
@@ -198,14 +199,14 @@ return function(Hub)
     end))
 
     --==================================================
-    -- [D] TILE SELECT POPUP (5x5 DENGAN TOMBOL X)
+    -- [D] TILE SELECT POPUP (DENGAN TOMBOL SILANG / X)
     --==================================================
 
     local function activeTileCount()
         local count = 0
         for dy = -2, 2 do
             for dx = -2, 2 do
-                if not (dx == 0 and dy == 0) and enabled[dx .. "," .. dy] ~= false then
+                if enabledTiles[dx .. "," .. dy] ~= false then
                     count += 1
                 end
             end
@@ -215,7 +216,7 @@ return function(Hub)
 
     local function updateTileButton()
         if tileButton and tileButton.Parent then
-            tileButton.Text = ("PILIH TILE  |  %d TARGET AKTIF"):format(activeTileCount() + 1)
+            tileButton.Text = ("PILIH TILE  |  %d TARGET AKTIF"):format(activeTileCount())
         end
     end
 
@@ -301,28 +302,30 @@ return function(Hub)
                 if dx == 0 and dy == 0 then
                     b.Text = "YOU"
                     b.BackgroundColor3 = Theme.PanelDark
-                    b.Active = false
-                    b.AutoButtonColor = false
-                else
-                    local key = dx .. "," .. dy
-                    if enabled[key] == nil then
-                        enabled[key] = true
-                    end
-
-                    local function paint()
-                        local on = enabled[key] ~= false
-                        b.Text = on and "ON" or "OFF"
-                        b.BackgroundColor3 = on and Theme.Green or Theme.PanelDark
-                    end
-                    paint()
-
-                    track(b.Activated:Connect(function()
-                        if running or destroyed then return end
-                        enabled[key] = not (enabled[key] ~= false)
-                        paint()
-                        updateTileButton()
-                    end))
                 end
+
+                local key = dx .. "," .. dy
+                if enabledTiles[key] == nil then
+                    enabledTiles[key] = true
+                end
+
+                local function paint()
+                    local on = enabledTiles[key] ~= false
+                    if dx == 0 and dy == 0 then
+                        b.Text = "YOU"
+                    else
+                        b.Text = on and "ON" or "OFF"
+                    end
+                    b.BackgroundColor3 = on and Theme.Green or Theme.PanelDark
+                end
+                paint()
+
+                track(b.Activated:Connect(function()
+                    if running or destroyed then return end
+                    enabledTiles[key] = not (enabledTiles[key] ~= false)
+                    paint()
+                    updateTileButton()
+                end))
             end
         end
 
@@ -330,7 +333,7 @@ return function(Hub)
             Position = UDim2.new(0, 10, 1, -35),
             Size = UDim2.new(1, -20, 0, 25),
             BackgroundTransparency = 1,
-            Text = "Hijau = aktif | Abu-abu = nonaktif",
+            Text = "Hijau = aktif (diambil) | Abu = nonaktif",
             TextColor3 = Theme.Muted,
             Font = Enum.Font.Gotham,
             TextSize = 9,
@@ -343,7 +346,7 @@ return function(Hub)
     track(tileButton.Activated:Connect(openPopup))
 
     --==================================================
-    -- [E] DISCOVERY LOGIC (PERSIS POLA APB)
+    -- [E] DISCOVERY & GAME HELPERS (FIXED WITH GETGC)
     --==================================================
 
     local function raw(t, k)
@@ -352,106 +355,82 @@ return function(Hub)
         return ok and value or nil
     end
 
-    local function findTakeFn(objects)
-        for _, fn in ipairs(objects) do
-            if type(fn) == "function" then
-                local okN, name = pcall(debug.info, fn, "n")
-                if okN and (name == "take" or name == "takeDrop" or name == "worldTake") then
-                    return fn
-                end
-            end
-        end
-        return rawget(_G, "worldTake") or (getgenv and rawget(getgenv(), "worldTake"))
-    end
-
     local function discover()
-        if type(getgc) ~= "function" or not (debug and debug.info) then
-            return false, "Executor tidak mendukung getgc/debug.info"
-        end
-
+        if type(getgc) ~= "function" then return end
         local ok, objects = pcall(getgc, true)
-        if not ok or type(objects) ~= "table" then
-            return false, "getgc(true) gagal"
-        end
+        if not ok or type(objects) ~= "table" then return end
 
-        refs.State, refs.Drops = nil, nil
+        refs.State = nil
+        refs.DropsContainer = nil
+        refs.TakeFn = nil
 
         for _, obj in ipairs(objects) do
             if type(obj) == "table" then
+                -- Cari State Player
                 if not refs.State then
                     local stateFn = raw(obj, "state")
                     if type(stateFn) == "function" then
                         local good, state = pcall(stateFn)
-                        if good and type(state) == "table"
-                            and type(state.x) == "number"
-                            and type(state.y) == "number" then
+                        if good and type(state) == "table" and type(state.x) == "number" and type(state.y) == "number" then
                             refs.State = stateFn
                         end
                     end
                 end
 
-                if not refs.Drops then
+                -- Cari Wadah Drops yang memiliki .list
+                if not refs.DropsContainer then
                     local list = raw(obj, "list")
                     if type(list) == "table" then
                         for _, item in pairs(list) do
                             if type(item) == "table" and raw(item, "x") and raw(item, "y") and (raw(item, "uid") or raw(item, "id")) then
-                                refs.Drops = obj
+                                refs.DropsContainer = obj
                                 break
                             end
                         end
                     end
                 end
             end
+
+            -- Cari Fungsi Take / WorldTake via debug.info
+            if not refs.TakeFn and type(obj) == "function" and debug and debug.info then
+                local okN, name = pcall(debug.info, obj, "n")
+                if okN and (name == "take" or name == "takeDrop" or name == "worldTake") then
+                    refs.TakeFn = obj
+                end
+            end
         end
-
-        refs.TakeFn = findTakeFn(objects)
-
-        if not refs.State then
-            return false, "Referensi State player tidak ditemukan"
-        end
-
-        return true, "Scan berhasil: State & Drops siap."
     end
 
     local function playerTile()
+        if not refs.State then return nil, nil end
         local ok, state = pcall(refs.State)
-        if not ok or type(state) ~= "table"
-            or type(state.x) ~= "number"
-            or type(state.y) ~= "number" then
+        if not ok or type(state) ~= "table" or type(state.x) ~= "number" then
             return nil, nil
         end
         return math.floor(state.x), math.floor(state.y - 0.475)
     end
 
-    local function getDropsList()
-        if refs.Drops and type(raw(refs.Drops, "list")) == "table" then
-            return refs.Drops.list
+    local function getActiveDrops()
+        -- 1. Cek dari hasil temuan getgc
+        if refs.DropsContainer and type(raw(refs.DropsContainer, "list")) == "table" then
+            return refs.DropsContainer.list
         end
+        -- 2. Fallback ke variabel global
         if rawget(_G, "Drops") and type(_G.Drops.list) == "table" then
             return _G.Drops.list
         end
         if getgenv and getgenv().Drops and type(getgenv().Drops.list) == "table" then
             return getgenv().Drops.list
         end
+        if Drops and type(Drops.list) == "table" then
+            return Drops.list
+        end
         return nil
     end
 
     --==================================================
-    -- [F] BUTTON EVENTS & LOOP UTAMA (REMOTE MODE)
+    -- [F] BUTTON EVENTS & LOOP UTAMA (REMOTE COLLECTION)
     --==================================================
-
-    track(scanButton.Activated:Connect(function()
-        if running then
-            report("Stop proses sebelum scan ulang.")
-            return
-        end
-
-        task.spawn(function()
-            local ok, message = discover()
-            if destroyed or Hub.IsClosing() then return end
-            report(ok and message or ("SCAN GAGAL: " .. message))
-        end)
-    end))
 
     track(stopButton.Activated:Connect(function()
         running = false
@@ -461,34 +440,34 @@ return function(Hub)
     track(startButton.Activated:Connect(function()
         if running then return end
 
-        local okScan, msgScan = discover()
-        if not okScan then
-            report("Gagal Start: " .. msgScan)
-            return
-        end
+        discover() -- Jalankan pencarian referensi saat start
 
         local delayMs = tonumber(collectDelayBox.Text)
         if not delayMs or delayMs < 0 then
-            report("Jeda collect harus berupa angka valid (ms).")
+            report("Error: Jeda collect harus berupa angka valid.")
             return
         end
 
         closePopup()
         running = true
+        report("Auto Collect aktif (Remote Mode)...")
 
         task.spawn(function()
-            report("AUTO COLLECT RUNNING (Remote Mode)...")
-
             while running and not destroyed and not Hub.IsClosing() do
+                -- Lakukan refresh discover berkala jika referensi belum lengkap
+                if not refs.State or not refs.TakeFn then
+                    discover()
+                end
+
                 local px, py = playerTile()
-                if not px then
-                    report("STATUS: Error - Posisi player tidak terbaca.")
+                if not px or not py then
+                    report("Error: Posisi player tidak terbaca.")
                     task.wait(0.5)
                     continue
                 end
 
-                pcall(function()
-                    local dropsList = getDropsList()
+                local success, err = pcall(function()
+                    local dropsList = getActiveDrops()
                     if type(dropsList) == "table" then
                         for _, drop in ipairs(dropsList) do
                             if drop and drop.x and drop.y then
@@ -497,11 +476,13 @@ return function(Hub)
                                     local dx = drop.x - px
                                     local dy = drop.y - py
 
+                                    -- Validasi area 5x5 (-2 s/d 2)
                                     if dx >= -2 and dx <= 2 and dy >= -2 and dy <= 2 then
                                         local key = dx .. "," .. dy
-                                        if dx == 0 and dy == 0 or enabled[key] ~= false then
+                                        if enabledTiles[key] ~= false then
+                                            -- Eksekusi Remote Collect persis cara kerja k.lua secara paralel
                                             task.spawn(function()
-                                                if refs.TakeFn and type(refs.TakeFn) == "function" then
+                                                if refs.TakeFn then
                                                     pcall(refs.TakeFn, uid, drop.amount or 1)
                                                 elseif worldTake then
                                                     pcall(worldTake, uid, drop.amount or 1)
@@ -517,33 +498,24 @@ return function(Hub)
                     end
                 end)
 
+                if not success then
+                    report("Error saat collect: " .. tostring(err))
+                end
+
                 task.wait(delayMs / 1000)
             end
 
             running = false
-            if not destroyed then report("AUTO COLLECT BERHENTI.") end
+            if not destroyed then report("Auto Collect berhenti.") end
         end)
     end))
 
     --==================================================
-    -- [G] INITIAL SCAN & CLEANUP
+    -- [G] CLEANUP
     --==================================================
-
-    task.spawn(function()
-        task.wait(0.5)
-        if destroyed or Hub.IsClosing() then return end
-        local callOk, scanOk, message = pcall(discover)
-        if destroyed or Hub.IsClosing() then return end
-        if not callOk then
-            report("ERROR SAAT SCAN: " .. tostring(scanOk))
-            return
-        end
-        report(scanOk and message or ("SCAN GAGAL: " .. tostring(message)))
-    end)
 
     local function cleanup()
         if destroyed then return end
-
         destroyed = true
         running = false
         closePopup()
@@ -559,7 +531,7 @@ return function(Hub)
     Hub.RegisterCleanup(cleanup)
     updateTileButton()
 
-    print("[AutoCollect] Submenu loaded successfully.")
+    print("[AutoCollect] Module loaded successfully.")
 
     end)
 
