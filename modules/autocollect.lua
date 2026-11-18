@@ -1,20 +1,19 @@
 --==================================================
--- MODULE: AUTO COLLECT SCANNER (GROWBLOX HUB)
--- Read-only diagnostic scanner.
--- Does NOT invoke game functions or fire remotes.
+-- MODULE: AUTO COLLECT ACTION RECORDER
+-- Read-only recorder for player movement, user input,
+-- and inventory delta for item ID 3 (Dirt Seed).
+-- Does NOT fire remotes or call game collect functions.
 --==================================================
 
 return function(Hub)
-    Hub.RegisterTab("AutoCollect Scanner", function(page)
+    Hub.RegisterTab("AutoCollect Recorder", function(page)
         local Players = game:GetService("Players")
-        local ReplicatedStorage = game:GetService("ReplicatedStorage")
-        local Workspace = game:GetService("Workspace")
+        local UserInputService = game:GetService("UserInputService")
         local LocalPlayer = Players.LocalPlayer
 
         local Theme = {
             Background = Color3.fromRGB(250, 220, 228),
             Panel = Color3.fromRGB(239, 194, 207),
-            PanelDark = Color3.fromRGB(222, 164, 183),
             Accent = Color3.fromRGB(171, 91, 119),
             Text = Color3.fromRGB(76, 43, 57),
             Muted = Color3.fromRGB(139, 96, 111),
@@ -24,17 +23,22 @@ return function(Hub)
         }
 
         local destroyed = false
+        local recording = false
         local lines = {}
         local output
-        local MAX_LOG_LINES = 500
-        local MAX_GC_OBJECTS = 30000
-        local MAX_DESCENDANTS = 15000
+        local connections = {}
+        local recordStarted = 0
+        local lastSample = 0
+        local lastPosition
+        local lastInventoryCount
+        local inventoryRef
+        local ITEM_ID = 3
+        local SAMPLE_INTERVAL = 0.20
+        local MAX_LINES = 1200
 
         local function create(className, properties, parent)
             local object = Instance.new(className)
-            for property, value in pairs(properties or {}) do
-                object[property] = value
-            end
+            for property, value in pairs(properties or {}) do object[property] = value end
             object.Parent = parent
             return object
         end
@@ -45,361 +49,276 @@ return function(Hub)
             c.Parent = object
         end
 
+        local function safeString(value)
+            local ok, result = pcall(tostring, value)
+            if not ok then return "?" end
+            return result:gsub("\n", " "):gsub("\r", " ")
+        end
+
+        local function elapsed()
+            return string.format("+%.2fs", math.max(0, os.clock() - recordStarted))
+        end
+
         local function append(message)
             if destroyed or Hub.IsClosing() then return end
-            local stamp = os.date("%H:%M:%S")
-            table.insert(lines, ("[%s] %s"):format(stamp, tostring(message)))
-            while #lines > MAX_LOG_LINES do
-                table.remove(lines, 1)
-            end
+            local line = (recording and elapsed() or os.date("%H:%M:%S")) .. " | " .. safeString(message)
+            lines[#lines + 1] = line
+            while #lines > MAX_LINES do table.remove(lines, 1) end
             if output and output.Parent then
                 output.Text = table.concat(lines, "\n")
                 output.CursorPosition = -1
             end
-            print("[AC-SCANNER] " .. tostring(message))
+            print("[AC-RECORDER] " .. line)
         end
 
-        local function clearLog()
-            table.clear(lines)
-            if output and output.Parent then output.Text = "" end
-            append("Log dibersihkan.")
+        local function setStatus(value, color)
+            status.Text = "Status: " .. value
+            if color then status.TextColor3 = color end
         end
 
-        local function makeButton(label, color, parent)
-            local b = create("TextButton", {
-                Size = UDim2.new(1, 0, 0, 34),
-                BackgroundColor3 = color or Theme.Accent,
-                BorderSizePixel = 0,
-                Text = label,
-                TextColor3 = Theme.White,
-                Font = Enum.Font.GothamBold,
-                TextSize = 11,
-                AutoButtonColor = true,
-            }, parent or page)
-            corner(b, 7)
-            return b
+        local function raw(t, key)
+            if type(t) ~= "table" then return nil end
+            local ok, value = pcall(rawget, t, key)
+            return ok and value or nil
         end
 
-        local layout = create("UIListLayout", {
-            Padding = UDim.new(0, 7),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, page)
+        local function isInventoryCandidate(t)
+            if type(t) ~= "table" then return false end
+            local slots, capacity = raw(t, "slots"), raw(t, "capacity")
+            if type(slots) ~= "table" or type(capacity) ~= "number" or capacity < 0 or capacity > 10000 then
+                return false
+            end
+            local valid = 0
+            for key, slot in pairs(slots) do
+                if type(key) == "number" and type(slot) == "table"
+                    and (raw(slot, "id") ~= nil or raw(slot, "n") ~= nil) then
+                    valid += 1
+                    if valid >= 2 then break end
+                end
+            end
+            return valid > 0 or next(slots) == nil
+        end
 
+        local function findInventory()
+            if inventoryRef and isInventoryCandidate(inventoryRef) then return inventoryRef end
+            inventoryRef = nil
+            local getter = getgc
+            if type(getter) ~= "function" then return nil end
+            local ok, objects = pcall(getter, true)
+            if not ok or type(objects) ~= "table" then return nil end
+            local best, bestScore = nil, -1
+            for _, object in ipairs(objects) do
+                if isInventoryCandidate(object) then
+                    local slots = raw(object, "slots")
+                    local score = 0
+                    for _, slot in pairs(slots) do
+                        if type(slot) == "table" and tonumber(raw(slot, "id")) then score += 2 end
+                    end
+                    score += math.min(tonumber(raw(object, "capacity")) or 0, 100) / 100
+                    if score > bestScore then best, bestScore = object, score end
+                end
+            end
+            inventoryRef = best
+            return best
+        end
+
+        local function countItem3()
+            local inv = findInventory()
+            if not inv then return nil end
+            local slots = raw(inv, "slots")
+            local total = 0
+            for _, slot in pairs(slots) do
+                if type(slot) == "table" and tonumber(raw(slot, "id")) == ITEM_ID then
+                    total += tonumber(raw(slot, "n")) or 0
+                end
+            end
+            return total
+        end
+
+        local function getCharacterState()
+            local character = LocalPlayer and LocalPlayer.Character
+            if not character then return nil end
+            local root = character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if not root then return nil end
+            local p, v = root.Position, root.AssemblyLinearVelocity
+            local move = humanoid and humanoid.MoveDirection or Vector3.zero
+            local state = humanoid and safeString(humanoid:GetState()) or "?"
+            return {
+                x = p.X, y = p.Y, z = p.Z,
+                vx = v.X, vy = v.Y, vz = v.Z,
+                mx = move.X, my = move.Y, mz = move.Z,
+                state = state,
+            }
+        end
+
+        local function round(n)
+            return math.floor((n or 0) * 100 + 0.5) / 100
+        end
+
+        local function recordMovement(state)
+            if not state then
+                append("PLAYER unavailable (character/root belum ditemukan)")
+                return
+            end
+            local p = Vector3.new(state.x, state.y, state.z)
+            if not lastPosition then
+                append(("POS awal X=%.2f Y=%.2f Z=%.2f | Humanoid=%s"):format(state.x, state.y, state.z, state.state))
+            else
+                local distance = (p - lastPosition).Magnitude
+                if distance >= 0.035 then
+                    append(("MOVE Δ=%.3f | POS %.2f, %.2f, %.2f | VEL %.2f, %.2f, %.2f | Humanoid=%s")
+                        :format(distance, state.x, state.y, state.z, state.vx, state.vy, state.vz, state.state))
+                end
+            end
+            lastPosition = p
+        end
+
+        local function stopRecording(reason)
+            if not recording then return end
+            recording = false
+            setStatus("STOPPED - " .. (reason or "manual"), Theme.Red)
+            append("=== RECORDING STOP === " .. (reason or "manual"))
+            append("Total baris feedback: " .. tostring(#lines))
+            stopButton.Text = "RECORDING STOPPED"
+            startButton.Text = "START RECORDING"
+        end
+
+        local function startRecording()
+            if recording then return end
+            lines = {}
+            output.Text = ""
+            recordStarted = os.clock()
+            lastSample = 0
+            lastPosition = nil
+            inventoryRef = nil
+            lastInventoryCount = countItem3()
+            recording = true
+            setStatus("RECORDING - ambil 1 Dirt Seed (ID 3)", Theme.Green)
+            append("=== RECORDING START ===")
+            append("Target item: Dirt Seed | ID=" .. ITEM_ID)
+            append("Inventory count awal ID 3 = " .. (lastInventoryCount == nil and "TIDAK TERBACA" or tostring(lastInventoryCount)))
+            append("Lakukan satu kali take/pickup, lalu tekan STOP RECORDING.")
+            startButton.Text = "RECORDING..."
+        end
+
+        local layout = create("UIListLayout", { Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder }, page)
         local intro = create("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 48),
-            BackgroundTransparency = 1,
-            Text = "READ-ONLY SCANNER | Mencari petunjuk fungsi, remote, dan objek dropped item. Tidak menjalankan remote apa pun.",
-            TextColor3 = Theme.Text,
-            Font = Enum.Font.Gotham,
-            TextSize = 10,
-            TextWrapped = true,
-            TextXAlignment = Enum.TextXAlignment.Left,
+            Size = UDim2.new(1, 0, 0, 55), BackgroundTransparency = 1,
+            Text = "ACTION RECORDER | Rekam posisi/pergerakan player, input klik/tap, dan perubahan jumlah Dirt Seed ID 3. READ-ONLY: tidak mengirim remote atau menjalankan fungsi collect.",
+            TextColor3 = Theme.Text, Font = Enum.Font.Gotham, TextSize = 10,
+            TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
             TextYAlignment = Enum.TextYAlignment.Center,
         }, page)
 
         local status = create("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 25),
-            BackgroundColor3 = Theme.Panel,
-            BorderSizePixel = 0,
-            Text = "Status: siap",
-            TextColor3 = Theme.Text,
-            Font = Enum.Font.GothamBold,
-            TextSize = 10,
-            TextXAlignment = Enum.TextXAlignment.Left,
+            Size = UDim2.new(1, 0, 0, 27), BackgroundColor3 = Theme.Panel,
+            BorderSizePixel = 0, Text = "Status: siap", TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
         }, page)
         corner(status, 6)
 
+        local startButton = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = Theme.Green,
+            BorderSizePixel = 0, Text = "START RECORDING", TextColor3 = Theme.White,
+            Font = Enum.Font.GothamBold, TextSize = 11,
+        }, page)
+        corner(startButton, 7)
+
+        local stopButton = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = Theme.Red,
+            BorderSizePixel = 0, Text = "STOP RECORDING", TextColor3 = Theme.White,
+            Font = Enum.Font.GothamBold, TextSize = 11,
+        }, page)
+        corner(stopButton, 7)
+
+        local copyButton = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = Theme.Accent,
+            BorderSizePixel = 0, Text = "COPY FEEDBACK", TextColor3 = Theme.White,
+            Font = Enum.Font.GothamBold, TextSize = 11,
+        }, page)
+        corner(copyButton, 7)
+
+        local clearButton = create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = Theme.Panel,
+            BorderSizePixel = 0, Text = "CLEAR FEEDBACK", TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold, TextSize = 10,
+        }, page)
+        corner(clearButton, 7)
+
         output = create("TextBox", {
-            Size = UDim2.new(1, 0, 0, 260),
-            BackgroundColor3 = Color3.fromRGB(255, 245, 248),
-            BorderSizePixel = 0,
-            Text = "[AC-SCANNER] Siap. Tekan salah satu tombol scan.\n",
-            TextColor3 = Theme.Text,
-            PlaceholderColor3 = Theme.Muted,
-            Font = Enum.Font.Code,
-            TextSize = 10,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextYAlignment = Enum.TextYAlignment.Top,
-            TextWrapped = false,
-            MultiLine = true,
-            ClearTextOnFocus = false,
-            TextEditable = false,
+            Size = UDim2.new(1, 0, 0, 300), BackgroundColor3 = Color3.fromRGB(255, 245, 248),
+            BorderSizePixel = 0, Text = "Siap. Tekan START RECORDING, ambil tepat 1 Dirt Seed (ID 3), lalu STOP dan COPY FEEDBACK.",
+            TextColor3 = Theme.Text, PlaceholderColor3 = Theme.Muted,
+            Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = false,
+            MultiLine = true, ClearTextOnFocus = false, TextEditable = false,
         }, page)
         corner(output, 7)
 
-        local function setStatus(value)
-            status.Text = "Status: " .. tostring(value)
-        end
-
-        local function getConstants(fn)
-            local getter = (debug and debug.getconstants) or getconstants or getconsts
-            if type(getter) ~= "function" then return nil end
-            local ok, result = pcall(getter, fn)
-            return ok and type(result) == "table" and result or nil
-        end
-
-        local function getUpvalues(fn)
-            local getter = (debug and debug.getupvalues) or getupvalues or getupvals
-            if type(getter) ~= "function" then return nil end
-            local ok, result = pcall(getter, fn)
-            return ok and type(result) == "table" and result or nil
-        end
-
-        local function functionInfo(fn)
-            local name, params, variadic = "?", "?", "?"
-            if debug and type(debug.info) == "function" then
-                local okN, n = pcall(debug.info, fn, "n")
-                local okA, a, v = pcall(debug.info, fn, "a")
-                if okN and n ~= nil and n ~= "" then name = tostring(n) end
-                if okA then
-                    params = tostring(a)
-                    variadic = tostring(v)
-                end
-            end
-            return name, params, variadic
-        end
-
-        local KEYWORDS = {
-            "collect", "pickup", "pick_up", "take", "grab", "loot",
-            "drop", "dropped", "item", "gem", "seed", "harvest",
-            "touch", "proximity", "inventory", "remove", "claim",
-            "receive", "reward", "spawn", "worlditem", "world_item",
-        }
-
-        local function keywordHits(value)
-            local s = string.lower(tostring(value))
-            local hits = {}
-            for _, word in ipairs(KEYWORDS) do
-                if string.find(s, word, 1, true) then
-                    hits[#hits + 1] = word
-                end
-            end
-            return hits
-        end
-
-        local function safeString(value, limit)
-            local ok, result = pcall(tostring, value)
-            if not ok then return "<tostring error>" end
-            result = result:gsub("\n", " "):gsub("\r", " ")
-            limit = limit or 110
-            if #result > limit then result = result:sub(1, limit) .. "..." end
-            return result
-        end
-
-        local function scanCapabilities()
-            append("=== EXECUTOR CAPABILITIES ===")
-            local checks = {
-                "getgc", "getconstants", "getconsts", "getupvalues",
-                "getupvals", "setclipboard", "toclipboard", "gethui",
-            }
-            for _, name in ipairs(checks) do
-                local value = (getgenv and getgenv()[name]) or _G[name]
-                append(name .. " = " .. (type(value) == "function" and "AVAILABLE" or "not found"))
-            end
-            append("debug.info = " .. tostring(debug and type(debug.info) == "function"))
-            append("debug.getconstants = " .. tostring(debug and type(debug.getconstants) == "function"))
-        end
-
-        local function scanRemotes()
-            append("=== REMOTE INSTANCE SCAN ===")
-            local total, matched = 0, 0
-            local ok, descendants = pcall(function() return game:GetDescendants() end)
-            if not ok or type(descendants) ~= "table" then
-                append("GAGAL membaca game:GetDescendants(): " .. safeString(descendants))
-                return
-            end
-            for _, obj in ipairs(descendants) do
-                total += 1
-                if total > MAX_DESCENDANTS then
-                    append("Batas descendant tercapai: " .. MAX_DESCENDANTS)
-                    break
-                end
-                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                    matched += 1
-                    local path = "?"
-                    pcall(function() path = obj:GetFullName() end)
-                    append(("REMOTE %s | %s | %s"):format(obj.ClassName, obj.Name, path))
-                end
-            end
-            append(("Remote ditemukan: %d | descendant diperiksa: %d"):format(matched, math.min(total, MAX_DESCENDANTS)))
-            append("Catatan: nama remote saja tidak membuktikan remote tersebut untuk collect.")
-        end
-
-        local function scanFunctions()
-            append("=== GC FUNCTION SCAN ===")
-            local gc = getgc
-            if type(gc) ~= "function" then
-                append("getgc tidak tersedia di executor ini.")
-                return
-            end
-            local ok, objects = pcall(gc, true)
-            if not ok or type(objects) ~= "table" then
-                append("getgc(true) gagal: " .. safeString(objects))
-                return
-            end
-
-            local scanned, matched = 0, 0
-            for _, obj in ipairs(objects) do
-                if scanned >= MAX_GC_OBJECTS then
-                    append("Batas GC tercapai: " .. MAX_GC_OBJECTS)
-                    break
-                end
-                if type(obj) == "function" then
-                    scanned += 1
-                    local name, params, variadic = functionInfo(obj)
-                    local constants = getConstants(obj)
-                    local upvalues = getUpvalues(obj)
-                    local hits, evidence = {}, {}
-
-                    for _, value in pairs(constants or {}) do
-                        local found = keywordHits(value)
-                        for _, word in ipairs(found) do hits[word] = true end
-                        if #found > 0 then
-                            evidence[#evidence + 1] = "const=" .. safeString(value, 70)
-                        end
-                    end
-                    for key, value in pairs(upvalues or {}) do
-                        local keyHits = keywordHits(key)
-                        local valueHits = keywordHits(value)
-                        for _, word in ipairs(keyHits) do hits[word] = true end
-                        for _, word in ipairs(valueHits) do hits[word] = true end
-                        if #keyHits > 0 or #valueHits > 0 then
-                            evidence[#evidence + 1] = "upvalue[" .. safeString(key, 35) .."]=" .. safeString(value, 70)
-                        end
-                    end
-                    for word in pairs(keywordHits(name)) do hits[word] = true end
-
-                    local hitList = {}
-                    for word in pairs(hits) do hitList[#hitList + 1] = word end
-                    table.sort(hitList)
-                    if #hitList > 0 then
-                        matched += 1
-                        append(("FUNC #%d name=%s args=%s variadic=%s | hits=%s"):format(
-                            scanned, name, params, variadic, table.concat(hitList, ",")
-                        ))
-                        for i = 1, math.min(#evidence, 5) do
-                            append("  " .. evidence[i])
-                        end
-                    end
-                end
-            end
-            append(("Function diperiksa: %d | kandidat keyword: %d"):format(scanned, matched))
-            append("Kandidat hanya petunjuk dari nama/constant/upvalue, bukan bukti fungsi collect.")
-        end
-
-        local function scanDroppedObjects()
-            append("=== WORLD DROPPED-OBJECT NAME SCAN ===")
-            local total, matched = 0, 0
-            local ok, descendants = pcall(function() return Workspace:GetDescendants() end)
-            if not ok or type(descendants) ~= "table" then
-                append("GAGAL membaca Workspace: " .. safeString(descendants))
-                return
-            end
-            for _, obj in ipairs(descendants) do
-                total += 1
-                if total > MAX_DESCENDANTS then
-                    append("Batas object Workspace tercapai: " .. MAX_DESCENDANTS)
-                    break
-                end
-                local hits = keywordHits(obj.Name)
-                if #hits > 0 then
-                    matched += 1
-                    local path = "?"
-                    pcall(function() path = obj:GetFullName() end)
-                    local position = "n/a"
-                    pcall(function()
-                        if obj:IsA("BasePart") then
-                            local p = obj.Position
-                            position = ("%.2f, %.2f, %.2f"):format(p.X, p.Y, p.Z)
-                        elseif obj:IsA("Model") and obj.PrimaryPart then
-                            local p = obj.PrimaryPart.Position
-                            position = ("%.2f, %.2f, %.2f"):format(p.X, p.Y, p.Z)
-                        end
-                    end)
-                    append(("OBJECT %s | %s | pos=%s | %s"):format(
-                        obj.ClassName, obj.Name, position, path
-                    ))
-                end
-            end
-            append(("Object bernama relevan: %d | Workspace diperiksa: %d"):format(
-                matched, math.min(total, MAX_DESCENDANTS)
-            ))
-            append("Catatan: dropped item bisa disimpan sebagai data Lua, bukan Instance bernama di Workspace.")
-        end
-
-        local function runScan(label, callback)
-            if destroyed or Hub.IsClosing() then return end
-            setStatus("scan " .. label .. "...")
-            append("----------------------------------------")
-            append("MULAI: " .. label)
-            task.spawn(function()
-                local ok, err = pcall(callback)
-                if not ok then append("SCAN ERROR: " .. safeString(err, 300)) end
-                if not destroyed and not Hub.IsClosing() then
-                    append("SELESAI: " .. label)
-                    setStatus("selesai - " .. label)
-                end
-            end)
-        end
-
-        local scanAll = makeButton("SCAN ALL (CAPABILITIES + REMOTES + FUNCTIONS + WORLD)", Theme.Green)
-        local scanRemoteButton = makeButton("SCAN REMOTE EVENT / FUNCTION", Theme.Accent)
-        local scanFunctionButton = makeButton("SCAN GC FUNCTIONS + CONSTANTS", Theme.Accent)
-        local scanWorldButton = makeButton("SCAN WORLD DROPPED-OBJECT NAMES", Theme.Accent)
-        local copyButton = makeButton("COPY FEEDBACK", Theme.PanelDark)
-        copyButton.TextColor3 = Theme.Text
-        local clearButton = makeButton("CLEAR FEEDBACK", Theme.PanelDark)
-        clearButton.TextColor3 = Theme.Text
-
-        scanAll.Activated:Connect(function()
-            runScan("ALL", function()
-                scanCapabilities()
-                scanRemotes()
-                scanFunctions()
-                scanDroppedObjects()
-            end)
-        end)
-        scanRemoteButton.Activated:Connect(function()
-            runScan("REMOTES", scanRemotes)
-        end)
-        scanFunctionButton.Activated:Connect(function()
-            runScan("FUNCTIONS", scanFunctions)
-        end)
-        scanWorldButton.Activated:Connect(function()
-            runScan("WORLD OBJECTS", scanDroppedObjects)
-        end)
-        clearButton.Activated:Connect(clearLog)
-        copyButton.Activated:Connect(function()
-            local content = table.concat(lines, "\n")
-            local copied = false
-            if type(setclipboard) == "function" then
-                copied = pcall(setclipboard, content)
-            elseif type(toclipboard) == "function" then
-                copied = pcall(toclipboard, content)
-            end
-            if copied then
-                setStatus("feedback berhasil disalin")
-                append("Feedback disalin ke clipboard.")
+        connections[#connections + 1] = startButton.Activated:Connect(startRecording)
+        connections[#connections + 1] = stopButton.Activated:Connect(function() stopRecording("manual") end)
+        connections[#connections + 1] = copyButton.Activated:Connect(function()
+            local text = table.concat(lines, "\n")
+            local copier = setclipboard or toclipboard
+            if type(copier) == "function" then
+                local ok, err = pcall(copier, text)
+                if ok then setStatus("feedback berhasil dicopy", Theme.Green); append("Feedback disalin ke clipboard.")
+                else setStatus("copy gagal: " .. safeString(err), Theme.Red) end
             else
-                setStatus("clipboard API tidak tersedia - salin manual dari kotak output")
-                append("Clipboard API tidak tersedia. Tekan lama kotak output untuk menyalin manual jika executor mendukung.")
+                setStatus("executor tidak menyediakan clipboard", Theme.Red)
+            end
+        end)
+        connections[#connections + 1] = clearButton.Activated:Connect(function()
+            if recording then stopRecording("log dibersihkan") end
+            lines = {}
+            output.Text = ""
+            append("Feedback dikosongkan.")
+            setStatus("siap", Theme.Text)
+        end)
+
+        connections[#connections + 1] = UserInputService.InputBegan:Connect(function(input, processed)
+            if not recording or processed then return end
+            local inputType = safeString(input.UserInputType)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                local pos = input.Position
+                append(("INPUT %s at X=%d Y=%d"):format(inputType, math.floor(pos.X), math.floor(pos.Y)))
+            elseif input.UserInputType == Enum.UserInputType.Keyboard then
+                append("KEY " .. safeString(input.KeyCode))
             end
         end)
 
-        append("Module AutoCollect Scanner aktif.")
-        append("Mode READ-ONLY: tidak memanggil fungsi game dan tidak mengirim remote.")
-        append("Player: " .. (LocalPlayer and LocalPlayer.Name or "tidak diketahui"))
-        append("Tekan SCAN ALL, lalu COPY FEEDBACK dan kirim hasilnya ke chat.")
+        task.spawn(function()
+            while not destroyed and not Hub.IsClosing() do
+                if recording and os.clock() - lastSample >= SAMPLE_INTERVAL then
+                    lastSample = os.clock()
+                    local state = getCharacterState()
+                    recordMovement(state)
+                    local currentCount = countItem3()
+                    if currentCount == nil then
+                        if lastInventoryCount ~= nil then append("INVENTORY scan tidak terbaca pada sample ini") end
+                    elseif lastInventoryCount == nil then
+                        append("INVENTORY ID 3 sekarang = " .. tostring(currentCount))
+                    elseif currentCount ~= lastInventoryCount then
+                        local delta = currentCount - lastInventoryCount
+                        append(("INVENTORY CHANGE itemID=3 | %d -> %d | delta=%+d"):format(lastInventoryCount, currentCount, delta))
+                        if delta > 0 then append("POTENTIAL PICKUP: jumlah Dirt Seed ID 3 bertambah " .. tostring(delta)) end
+                    end
+                    lastInventoryCount = currentCount
+                end
+                task.wait(0.05)
+            end
+        end)
 
         local function cleanup()
             if destroyed then return end
             destroyed = true
+            recording = false
+            for _, connection in ipairs(connections) do pcall(function() connection:Disconnect() end) end
+            table.clear(connections)
         end
         Hub.RegisterCleanup(cleanup)
-        print("[AutoCollect Scanner] Module loaded.")
+        append("Module aktif. Pastikan inventory awal item ID 3 terlihat sebelum mulai.")
     end)
 end
-
---==================================================
--- END MODULE: AUTO COLLECT SCANNER
---==================================================
