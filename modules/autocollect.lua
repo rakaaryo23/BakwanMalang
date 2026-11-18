@@ -16,48 +16,6 @@ return function(Hub)
         local refs = { Inv = nil, World = nil, State = nil }
         local Drops = { list = nil, update = nil, nextScan = 0 }
         local DropFailUntil = {}
-
-        -- TEST DIAGNOSTICS: logging only; does not send extra take requests.
-        local testMode = "SERIAL" -- SERIAL or PARALLEL
-        local testLog = {}
-        local function logTest(message)
-            local line = ("[AC TEST +%.3fs] %s"):format(os.clock(), tostring(message))
-            testLog[#testLog + 1] = line
-            if #testLog > 500 then table.remove(testLog, 1) end
-            print(line)
-        end
-
-        local function inventoryCount(itemId)
-            if not refs.Inv then return nil end
-            local slots = raw(refs.Inv, "slots")
-            if type(slots) ~= "table" then return nil end
-            local total = 0
-            for _, slot in pairs(slots) do
-                if type(slot) == "table" and tonumber(raw(slot, "id")) == itemId then
-                    total += tonumber(raw(slot, "n")) or 0
-                end
-            end
-            return total
-        end
-
-        local function copyTestLog()
-            local content = table.concat(testLog, "\n")
-            if type(setclipboard) == "function" then
-                local ok = pcall(setclipboard, content)
-                if ok then
-                    logTest("TEST LOG copied with setclipboard")
-                    return
-                end
-            end
-            if type(toclipboard) == "function" then
-                local ok = pcall(toclipboard, content)
-                if ok then
-                    logTest("TEST LOG copied with setclipboard")
-                    return
-                end
-            end
-            logTest("Clipboard tidak tersedia; salin log dari console")
-        end
         local enabled = {}
         local popup
 
@@ -320,10 +278,7 @@ return function(Hub)
         -- disertakan karena modul ini berdiri sendiri dan tidak berbagi State/Stats utama.
         local function takeDrop(d)
             local worldTake = refs.World and rawget(refs.World, "takeDrop")
-            if type(worldTake) ~= "function" then
-                logTest("SKIP: World.takeDrop tidak ditemukan")
-                return false
-            end
+            if type(worldTake) ~= "function" then return false end
             if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
             if d.armed == false and d.id ~= 112 then return false end
 
@@ -336,32 +291,17 @@ return function(Hub)
                 if okr and type(room) == "number" then amount = math.min(amount, room) end
             end
             if amount <= 0 then
-                logTest(("SKIP uid=%s id=%s: inventory room/amount=0"):format(
-                    tostring(d.uid), tostring(d.id)
-                ))
                 DropFailUntil[d.uid] = now + 1
                 return false
             end
-
-            local beforeInv = inventoryCount(d.id)
-            logTest(("TAKE START mode=%s uid=%s id=%s dropN=%s request=%s pos=(%s,%s) invBefore=%s"):format(
-                testMode, tostring(d.uid), tostring(d.id), tostring(d.n),
-                tostring(amount), tostring(d.x), tostring(d.y), tostring(beforeInv)
-            ))
 
             d.taking = true
             if typeof(d.frame) == "Instance" then
                 pcall(function() d.frame.Visible = false end)
             end
 
-            local callStart = os.clock()
             local ok, taken = pcall(worldTake, d.uid, amount)
-            local callElapsed = os.clock() - callStart
             d.taking = false
-
-            logTest(("TAKE RETURN uid=%s pcallOK=%s returnType=%s return=%s elapsed=%.3fs"):format(
-                tostring(d.uid), tostring(ok), type(taken), tostring(taken), callElapsed
-            ))
 
             if not (ok and type(taken) == "number" and taken > 0) then
                 d.refused = os.clock()
@@ -371,49 +311,14 @@ return function(Hub)
                 if typeof(d.frame) == "Instance" then
                     pcall(function() d.frame.Visible = not d.culled end)
                 end
-                logTest(("TAKE REJECTED uid=%s | visual restored | failN=%s"):format(
-                    tostring(d.uid), tostring(d.failN)
-                ))
                 return false
             end
 
             DropFailUntil[d.uid] = nil
-            local addOK, addErr = true, nil
             if d.id ~= 112 and refs.Inv then
-                addOK, addErr = pcall(function() refs.Inv:add(d.id, taken) end)
+                pcall(function() refs.Inv:add(d.id, taken) end)
             end
-            local afterLocalAdd = inventoryCount(d.id)
-            logTest(("LOCAL INVENTORY ADD uid=%s addOK=%s err=%s taken=%s before=%s after=%s delta=%s"):format(
-                tostring(d.uid), tostring(addOK), tostring(addErr), tostring(taken),
-                tostring(beforeInv), tostring(afterLocalAdd),
-                tostring((beforeInv and afterLocalAdd) and (afterLocalAdd - beforeInv) or "unknown")
-            ))
-
-            local left = math.max(0, (d.n or 0) - taken)
-            Drops.applyTaken(d, left)
-            logTest(("LOCAL DROP UPDATE uid=%s taken=%s left=%s stillInList=%s frameVisible=%s"):format(
-                tostring(d.uid), tostring(taken), tostring(left),
-                tostring(Drops.list and table.find(Drops.list, d) ~= nil),
-                tostring(typeof(d.frame) == "Instance" and d.frame.Visible or "no-frame")
-            ))
-
-            -- Observe possible later server/client reconciliation; no extra take call.
-            task.delay(0.35, function()
-                if destroyed then return end
-                local later = inventoryCount(d.id)
-                logTest(("FOLLOWUP 0.35s uid=%s inv=%s deltaFromBefore=%s"):format(
-                    tostring(d.uid), tostring(later),
-                    tostring((beforeInv and later) and (later - beforeInv) or "unknown")
-                ))
-            end)
-            task.delay(1.25, function()
-                if destroyed then return end
-                local later = inventoryCount(d.id)
-                logTest(("FOLLOWUP 1.25s uid=%s inv=%s deltaFromBefore=%s"):format(
-                    tostring(d.uid), tostring(later),
-                    tostring((beforeInv and later) and (later - beforeInv) or "unknown")
-                ))
-            end)
+            Drops.applyTaken(d, math.max(0, (d.n or 0) - taken))
             return true
         end
 
@@ -440,7 +345,7 @@ return function(Hub)
 
             for i = #list, 1, -1 do
                 local d = list[i]
-                if d.id == 3 and canTry(d, now) then -- TEST FILTER: Dirt Seed only
+                if canTry(d, now) then
                     local hit = false
                     for dy = -2, 2 do
                         for dx = -2, 2 do
@@ -453,15 +358,7 @@ return function(Hub)
                         end
                         if hit then break end
                     end
-                    if hit then
-                        if testMode == "SERIAL" then
-                            -- One take call completes before the next drop is attempted.
-                            takeDrop(d)
-                        else
-                            -- Original behavior: each matching drop gets its own task.
-                            task.spawn(takeDrop, d)
-                        end
-                    end
+                    if hit then task.spawn(takeDrop, d) end
                 end
             end
         end
@@ -515,41 +412,6 @@ return function(Hub)
             TextSize = 11,
         }, root)
         corner(toggle, 7)
-
-        local modeButton = create("TextButton", {
-            Position = UDim2.fromOffset(0, 112),
-            Size = UDim2.fromOffset(142, 30),
-            BackgroundColor3 = Theme.PanelDark,
-            BorderSizePixel = 0,
-            Text = "TEST MODE: SERIAL",
-            TextColor3 = Theme.Text,
-            Font = Enum.Font.GothamBold,
-            TextSize = 10,
-        }, root)
-        corner(modeButton, 7)
-
-        local copyButton = create("TextButton", {
-            Position = UDim2.fromOffset(150, 112),
-            Size = UDim2.fromOffset(148, 30),
-            BackgroundColor3 = Theme.PanelDark,
-            BorderSizePixel = 0,
-            Text = "COPY TEST LOG",
-            TextColor3 = Theme.Text,
-            Font = Enum.Font.GothamBold,
-            TextSize = 10,
-        }, root)
-        corner(copyButton, 7)
-
-        track(modeButton.Activated:Connect(function()
-            if running then
-                status.Text = "Status: stop dulu untuk mengganti test mode"
-                return
-            end
-            testMode = testMode == "SERIAL" and "PARALLEL" or "SERIAL"
-            modeButton.Text = "TEST MODE: " .. testMode
-            logTest("MODE CHANGED -> " .. testMode)
-        end))
-        track(copyButton.Activated:Connect(copyTestLog))
 
         local function activeCount()
             local n = 0
@@ -681,15 +543,8 @@ return function(Hub)
                     status.Text = "Status: daftar drop belum ditemukan"
                     return
                 end
-                testLog = {}
-                logTest(("SESSION START mode=%s selectedTiles=%d"):format(testMode, activeCount()))
-                logTest(("DROP LIST count=%s | itemID3 inventory=%s"):format(
-                    tostring(type(Drops.list) == "table" and #Drops.list or "unknown"),
-                    tostring(inventoryCount(3))
-                ))
                 setRunning(true)
             else
-                logTest(("SESSION STOP | itemID3 inventory=%s"):format(tostring(inventoryCount(3))))
                 setRunning(false)
             end
         end))
