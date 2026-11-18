@@ -6,7 +6,7 @@
 return function(Hub)
     assert(Hub and type(Hub.RegisterTab) == "function", "Hub.RegisterTab tidak ditemukan")
 
-    Hub.RegisterTab("Aut11o Collect", function(page, Hub)
+    Hub.RegisterTab("Auto Collect", function(page, Hub)
         local Players = game:GetService("Players")
         local ReplicatedStorage = game:GetService("ReplicatedStorage")
         local LocalPlayer = Players.LocalPlayer
@@ -276,92 +276,200 @@ return function(Hub)
 
         -- Fungsi takeDrop mengikuti k(5).lua; counter/UI statistik utama tidak
         -- disertakan karena modul ini berdiri sendiri dan tidak berbagi State/Stats utama.
-        local function takeDrop(d)
-            local worldTake = refs.World and rawget(refs.World, "takeDrop")
-            if type(worldTake) ~= "function" then return false end
-            if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
-            if d.armed == false and d.id ~= 112 then return false end
+        ---------------------------------------------------------------------
+-- AUTO COLLECT REMOTE | ADAPTASI k(7).lua
+---------------------------------------------------------------------
 
-            local now = os.clock()
-            if DropFailUntil[d.uid] and now < DropFailUntil[d.uid] then return false end
+local WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
+local TakeDropRemote = WorldRemotes
+    and WorldRemotes:FindFirstChild("TakeDrop")
 
-            local amount = d.n
-            if d.id ~= 112 and refs.Inv then
-                local okr, room = pcall(function() return refs.Inv:room(d.id) end)
-                if okr and type(room) == "number" then amount = math.min(amount, room) end
-            end
-            if amount <= 0 then
-                DropFailUntil[d.uid] = now + 1
-                return false
-            end
+-- Pengambilan drop langsung melalui fungsi game.
+local function takeDrop(d)
+    local worldTake = refs.World and rawget(refs.World, "takeDrop")
 
-            d.taking = true
-            if typeof(d.frame) == "Instance" then
-                pcall(function() d.frame.Visible = false end)
-            end
+    if type(worldTake) ~= "function" and not TakeDropRemote then
+        return false
+    end
 
-            local ok, taken = pcall(worldTake, d.uid, amount)
-            d.taking = false
+    if d.taking or d.pending or d.display or (d.n or 0) <= 0 then
+        return false
+    end
 
-            if not (ok and type(taken) == "number" and taken > 0) then
-                d.refused = os.clock()
-                d.failN = (d.failN or 0) + 1
-                DropFailUntil[d.uid] = os.clock() + math.min(8, d.failN)
-                d.flown = nil
-                if typeof(d.frame) == "Instance" then
-                    pcall(function() d.frame.Visible = not d.culled end)
-                end
-                return false
-            end
+    -- Drop buangan sendiri tidak boleh diambil, kecuali gems.
+    if d.armed == false and d.id ~= 112 then
+        return false
+    end
 
-            DropFailUntil[d.uid] = nil
-            if d.id ~= 112 and refs.Inv then
-                pcall(function() refs.Inv:add(d.id, taken) end)
-            end
-            Drops.applyTaken(d, math.max(0, (d.n or 0) - taken))
-            return true
+    local now = os.clock()
+
+    if DropFailUntil[d.uid] and now < DropFailUntil[d.uid] then
+        return false
+    end
+
+    local amount = d.n
+
+    if d.id ~= 112 and refs.Inv then
+        local okr, room = pcall(function()
+            return refs.Inv:room(d.id)
+        end)
+
+        if okr and type(room) == "number" then
+            amount = math.min(amount, room)
+        end
+    end
+
+    if amount <= 0 then
+        DropFailUntil[d.uid] = now + 1
+        return false
+    end
+
+    d.taking = true
+
+    if typeof(d.frame) == "Instance" then
+        pcall(function()
+            d.frame.Visible = false
+        end)
+    end
+
+    local ok, taken
+
+    if type(worldTake) == "function" then
+        ok, taken = pcall(worldTake, d.uid, amount)
+    else
+        ok, taken = pcall(
+            TakeDropRemote.InvokeServer,
+            TakeDropRemote,
+            d.uid,
+            amount
+        )
+    end
+
+    d.taking = false
+
+    if not (ok and type(taken) == "number" and taken > 0) then
+        d.refused = os.clock()
+        d.failN = (d.failN or 0) + 1
+
+        DropFailUntil[d.uid] =
+            os.clock() + math.min(8, d.failN)
+
+        d.flown = nil
+
+        if typeof(d.frame) == "Instance" then
+            pcall(function()
+                d.frame.Visible = not d.culled
+            end)
         end
 
-        -- Batas tile persis dari inTile() k(5).lua.
-        local function inTile(t, x, y)
-            return x >= t.x - 0.15 and x < t.x + 1.15
-                and y >= t.y - 0.15 and y < t.y + 1.15
+        return false
+    end
+
+    DropFailUntil[d.uid] = nil
+
+    if d.id == 112 then
+        if refs.Gems then
+            pcall(refs.Gems.addGems, taken)
         end
+    elseif refs.Inv then
+        pcall(function()
+            refs.Inv:add(d.id, taken)
+        end)
+    end
 
-        local function canTry(d, now)
-            if type(d) ~= "table" or d.taking or (d.n or 0) <= 0
-                or type(d.x) ~= "number" then return false end
-            if d.armed == false and d.id ~= 112 then return false end
-            local fail = DropFailUntil[d.uid]
-            return not (fail and now < fail)
-        end
+    Drops.applyTaken(
+        d,
+        math.max(0, (d.n or 0) - taken)
+    )
 
-        local function remoteTick()
-            local list = Drops.list
-            if type(list) ~= "table" then return end
-            local px, py = playerTile()
-            if not px then return end
-            local now = os.clock()
+    return true
+end
 
-            for i = #list, 1, -1 do
-                local d = list[i]
-                if canTry(d, now) then
-                    local hit = false
-                    for dy = -2, 2 do
-                        for dx = -2, 2 do
-                            local key = dx .. "," .. dy
-                            if enabled[key] == true
-                                and inTile({x = px + dx, y = py + dy}, d.x, d.y) then
-                                hit = true
-                                break
-                            end
-                        end
-                        if hit then break end
+---------------------------------------------------------------------
+-- TILE DETECTION
+---------------------------------------------------------------------
+
+local function inTile(t, x, y)
+    return x >= t.x - 0.15
+        and x < t.x + 1.15
+        and y >= t.y - 0.15
+        and y < t.y + 1.15
+end
+
+---------------------------------------------------------------------
+-- DROP VALIDATION
+---------------------------------------------------------------------
+
+local function canTry(d, now)
+    if type(d) ~= "table"
+        or d.taking
+        or (d.n or 0) <= 0
+        or type(d.x) ~= "number" then
+        return false
+    end
+
+    if d.armed == false and d.id ~= 112 then
+        return false
+    end
+
+    local fail = DropFailUntil[d.uid]
+
+    return not (fail and now < fail)
+end
+
+---------------------------------------------------------------------
+-- REMOTE COLLECTOR
+-- Mengambil seluruh drop pada tile aktif secara paralel.
+---------------------------------------------------------------------
+
+local function remoteTick()
+    local list = Drops.list
+
+    if type(list) ~= "table" then
+        return
+    end
+
+    local px, py = playerTile()
+
+    if not px then
+        return
+    end
+
+    local now = os.clock()
+
+    for i = #list, 1, -1 do
+        local d = list[i]
+
+        if canTry(d, now) then
+            local hit = false
+
+            for dy = -2, 2 do
+                for dx = -2, 2 do
+                    local key = dx .. "," .. dy
+
+                    if enabled[key] == true
+                        and inTile(
+                            { x = px + dx, y = py + dy },
+                            d.x,
+                            d.y
+                        ) then
+
+                        hit = true
+                        break
                     end
-                    if hit then task.spawn(takeDrop, d) end
+                end
+
+                if hit then
+                    break
                 end
             end
+
+            if hit then
+                task.spawn(takeDrop, d)
+            end
         end
+    end
+end
 
         -- UI dasar.
         local root = page
@@ -591,7 +699,7 @@ return function(Hub)
                 pcall(function() c:Disconnect() end)
             end
             table.clear(connections)
-        end 
+        end
 
         Hub.RegisterCleanup(cleanup)
         updateTileButton()
