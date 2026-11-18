@@ -1,6 +1,6 @@
 --==================================================
--- MODULE: AUTO COLLECT 5x5 REMOTE (GROWBLOX HUB - FIXED & WORKING)
--- Berbasis kode yang sukses ter-load, ditambah penemuan Drops & Take via getgc
+-- MODULE: AUTO COLLECT 5x5 REMOTE (WITH DEBUGGER)
+-- Melacak fungsi take/remote yang aktif di game
 --==================================================
 
 return function(Hub)
@@ -32,7 +32,6 @@ return function(Hub)
         TakeFn = nil,
     }
 
-    -- Grid 5x5: key format "dx,dy", value true/false (Default semua aktif)
     local enabledTiles = {}
     for dx = -2, 2 do
         for dy = -2, 2 do
@@ -150,7 +149,7 @@ return function(Hub)
         SortOrder = Enum.SortOrder.LayoutOrder,
     }, page)
 
-    statusLabel = makeLabel("Status: siap", 34)
+    statusLabel = makeLabel("Status: siap (Tekan Scan Take untuk deteksi fungsi)", 34)
     statusLabel.LayoutOrder = 1
 
     local areaLabel = makeLabel("Area target: 5 x 5 (Termasuk player di tengah)", 24)
@@ -159,15 +158,19 @@ return function(Hub)
     tileButton = makeButton("PILIH TILE  |  25 TARGET AKTIF", 34)
     tileButton.LayoutOrder = 3
 
+    local scanTakeButton = makeButton("SCAN FUNGSI TAKE (F9 CONSOLE)", 32, page, Theme.PanelDark)
+    scanTakeButton.TextColor3 = Theme.Text
+    scanTakeButton.LayoutOrder = 4
+
     local startButton = makeButton("START AUTO COLLECT", 36, page, Theme.Green)
-    startButton.LayoutOrder = 4
+    startButton.LayoutOrder = 5
 
     local stopButton = makeButton("STOP", 32, page, Theme.Red)
-    stopButton.LayoutOrder = 5
+    stopButton.LayoutOrder = 6
 
     local settingsButton = makeButton("PENGATURAN DELAY  ▼", 30, page, Theme.PanelDark)
     settingsButton.TextColor3 = Theme.Text
-    settingsButton.LayoutOrder = 6
+    settingsButton.LayoutOrder = 7
 
     local settingsFrame = create("Frame", {
         Size = UDim2.new(1, 0, 0, 0),
@@ -175,7 +178,7 @@ return function(Hub)
         BackgroundColor3 = Theme.Panel,
         BorderSizePixel = 0,
         Visible = false,
-        LayoutOrder = 7,
+        LayoutOrder = 8,
     }, page)
     corner(settingsFrame, 8)
 
@@ -229,12 +232,8 @@ return function(Hub)
 
     local function openPopup()
         if destroyed or popup then return end
-
         local screenGui = Hub.GetGui()
-        if not screenGui then
-            report("ScreenGui Hub tidak ditemukan.")
-            return
-        end
+        if not screenGui then return end
 
         popup = create("Frame", {
             Name = "AutoCollectPopup",
@@ -346,7 +345,7 @@ return function(Hub)
     track(tileButton.Activated:Connect(openPopup))
 
     --==================================================
-    -- [E] DISCOVERY & GAME HELPERS (FIXED WITH GETGC)
+    -- [E] DISCOVERY & DEBUGGER FUNGSI TAKE
     --==================================================
 
     local function raw(t, k)
@@ -366,7 +365,6 @@ return function(Hub)
 
         for _, obj in ipairs(objects) do
             if type(obj) == "table" then
-                -- Cari State Player
                 if not refs.State then
                     local stateFn = raw(obj, "state")
                     if type(stateFn) == "function" then
@@ -377,7 +375,6 @@ return function(Hub)
                     end
                 end
 
-                -- Cari Wadah Drops yang memiliki .list
                 if not refs.DropsContainer then
                     local list = raw(obj, "list")
                     if type(list) == "table" then
@@ -391,11 +388,15 @@ return function(Hub)
                 end
             end
 
-            -- Cari Fungsi Take / WorldTake via debug.info
+            -- Cari fungsi yang memiliki kata kunci 'take', 'drop', atau 'collect'
             if not refs.TakeFn and type(obj) == "function" and debug and debug.info then
                 local okN, name = pcall(debug.info, obj, "n")
-                if okN and (name == "take" or name == "takeDrop" or name == "worldTake") then
-                    refs.TakeFn = obj
+                if okN and name then
+                    local lowerName = string.lower(name)
+                    if string.find(lowerName, "take") or string.find(lowerName, "drop") or string.find(lowerName, "collect") then
+                        print("[AutoCollect Debug] Ditemukan fungsi potensial:", name)
+                        refs.TakeFn = obj
+                    end
                 end
             end
         end
@@ -411,11 +412,9 @@ return function(Hub)
     end
 
     local function getActiveDrops()
-        -- 1. Cek dari hasil temuan getgc
         if refs.DropsContainer and type(raw(refs.DropsContainer, "list")) == "table" then
             return refs.DropsContainer.list
         end
-        -- 2. Fallback ke variabel global
         if rawget(_G, "Drops") and type(_G.Drops.list) == "table" then
             return _G.Drops.list
         end
@@ -428,8 +427,19 @@ return function(Hub)
         return nil
     end
 
+    -- Tombol khusus untuk print fungsi yang terdeteksi ke Console (F9)
+    track(scanTakeButton.Activated:Connect(function()
+        discover()
+        if refs.TakeFn and debug and debug.info then
+            local name = debug.info(refs.TakeFn, "n")
+            report("Fungsi Take ditemukan: " .. tostring(name))
+        else
+            report("Fungsi Take tidak ditemukan secara otomatis.")
+        end
+    end))
+
     --==================================================
-    -- [F] BUTTON EVENTS & LOOP UTAMA (REMOTE COLLECTION)
+    -- [F] BUTTON EVENTS & LOOP UTAMA
     --==================================================
 
     track(stopButton.Activated:Connect(function()
@@ -440,7 +450,7 @@ return function(Hub)
     track(startButton.Activated:Connect(function()
         if running then return end
 
-        discover() -- Jalankan pencarian referensi saat start
+        discover()
 
         local delayMs = tonumber(collectDelayBox.Text)
         if not delayMs or delayMs < 0 then
@@ -454,10 +464,7 @@ return function(Hub)
 
         task.spawn(function()
             while running and not destroyed and not Hub.IsClosing() do
-                -- Lakukan refresh discover berkala jika referensi belum lengkap
-                if not refs.State or not refs.TakeFn then
-                    discover()
-                end
+                if not refs.State then discover() end
 
                 local px, py = playerTile()
                 if not px or not py then
@@ -466,7 +473,7 @@ return function(Hub)
                     continue
                 end
 
-                local success, err = pcall(function()
+                pcall(function()
                     local dropsList = getActiveDrops()
                     if type(dropsList) == "table" then
                         for _, drop in ipairs(dropsList) do
@@ -476,18 +483,28 @@ return function(Hub)
                                     local dx = drop.x - px
                                     local dy = drop.y - py
 
-                                    -- Validasi area 5x5 (-2 s/d 2)
                                     if dx >= -2 and dx <= 2 and dy >= -2 and dy <= 2 then
-                                        local key = dx .. "," .. dy
-                                        if enabledTiles[key] ~= false then
-                                            -- Eksekusi Remote Collect persis cara kerja k.lua secara paralel
+                                        local key = dx .. "," derivable or (dx .. "," .. dy)
+                                        if enabledTiles[dx .. "," .. dy] ~= false then
                                             task.spawn(function()
+                                                -- Coba berbagai kemungkinan cara eksekusi pengambilan item di game ini
                                                 if refs.TakeFn then
                                                     pcall(refs.TakeFn, uid, drop.amount or 1)
-                                                elseif worldTake then
+                                                end
+                                                if worldTake then
                                                     pcall(worldTake, uid, drop.amount or 1)
-                                                elseif TakeDropRemote then
+                                                end
+                                                if TakeDropRemote then
                                                     pcall(function() TakeDropRemote:InvokeServer(uid, drop.amount or 1) end)
+                                                end
+                                                -- Fallback eksekusi melalui event umum jika ada
+                                                if game:GetService("ReplicatedStorage") then
+                                                    local remote = game.ReplicatedStorage:FindFirstChild("TakeDrop") or game.ReplicatedStorage:FindFirstChild("DropTake")
+                                                    if remote and remote:IsA("RemoteEvent") then
+                                                        remote:FireServer(uid)
+                                                    elseif remote and remote:IsA("RemoteFunction") then
+                                                        remote:InvokeServer(uid)
+                                                    end
                                                 end
                                             end)
                                         end
@@ -497,10 +514,6 @@ return function(Hub)
                         end
                     end
                 end)
-
-                if not success then
-                    report("Error saat collect: " .. tostring(err))
-                end
 
                 task.wait(delayMs / 1000)
             end
