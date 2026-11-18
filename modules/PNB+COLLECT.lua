@@ -1,11 +1,12 @@
 --==================================================
--- MODULE: AUTO PUT + BREAK + AUTO COLLECT 7-8-9
--- Urutan: PUT 7,8,9 -> BREAK 7,8,9 -> COLLECT 7,8,9 -> REPEAT.
+-- MODULE: AUTO PUT + BREAK + COLLECT (TILES 7-9)
+-- File ini hanya berisi submenu. Tempel/ganti satu blok menu
+-- pada script GrowBlox Hub yang sudah memiliki Hub.RegisterTab.
 --==================================================
 
 return function(Hub)
 
-    Hub.RegisterTab("Auto PUT + BREAK + COLLECT", function(page)
+    Hub.RegisterTab("PUT + BREAK + COLLECT", function(page)
 
     --==================================================
     -- [A] CONFIGURATION & STATE
@@ -20,7 +21,6 @@ return function(Hub)
         BreakDelay = 140,
         BreakStartDelay = 150,
         CycleDelay = 150,
-        CollectDelay = 80,
     }
 
     local Theme = {
@@ -45,17 +45,15 @@ return function(Hub)
         State = nil,
         SetTile = nil,
         Hit = nil,
-        Gems = nil,
     }
 
-    local Drops = { list = nil, update = nil, nextScan = 0 }
-    local DropFailUntil = {}
+    local enabled = { ["-1,-1"] = true, ["0,-1"] = true, ["1,-1"] = true }
     local connections = {}
     local popup = nil
-
+    local Drops = { list = nil, update = nil }
+    local DropFailUntil = {}
     local WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
-    local TakeDropRemote = WorldRemotes
-        and WorldRemotes:FindFirstChild("TakeDrop")
+    local TakeDropRemote = WorldRemotes and WorldRemotes:FindFirstChild("TakeDrop")
 
     -- Forward declaration is IMPORTANT:
     -- report() must reference this local, not a global nil.
@@ -68,7 +66,7 @@ return function(Hub)
         if statusLabel and statusLabel.Parent then
             statusLabel.Text = "Status: " .. message
         end
-        print("[APB]", message)
+        print("[APB+COLLECT]", message)
     end
 
     local function track(connection)
@@ -175,12 +173,13 @@ return function(Hub)
     selectedLabel.LayoutOrder = 2
 
     local areaLabel = makeLabel(
-        "Target tetap: titik 7, 8, 9 | dihitung dari Player State",
+        "TARGET FIX: 7, 8, 9 | Player di tile 13",
         24
     )
     areaLabel.LayoutOrder = 3
 
-    tileButton = makeButton("TARGET FIXED  |  TITIK 7, 8, 9", 34)
+    tileButton = makeButton("TARGET TERKUNCI: TILE 7, 8, 9", 34, page, Theme.PanelDark)
+    tileButton.TextColor3 = Theme.Text
     tileButton.Active = false
     tileButton.AutoButtonColor = false
     tileButton.LayoutOrder = 4
@@ -248,9 +247,6 @@ return function(Hub)
     local cycleDelayBox = makeDelayBox(
         "Jeda antar siklus (ms)", CFG.CycleDelay, settingsFrame
     )
-    local collectDelayBox = makeDelayBox(
-        "Jeda antar COLLECT (ms)", CFG.CollectDelay, settingsFrame
-    )
 
     track(settingsButton.Activated:Connect(function()
         settingsFrame.Visible = not settingsFrame.Visible
@@ -260,33 +256,14 @@ return function(Hub)
     end))
 
     --==================================================
-    -- [D] FIXED TARGETS: 7, 8, 9
-
-    -- Grid 5x5 dengan player di titik 13.
-    -- 7 = dx -1,dy -1 | 8 = dx 0,dy -1 | 9 = dx 1,dy -1.
-    local TARGETS = {
-        { number = 7, dx = -1, dy = -1 },
-        { number = 8, dx =  0, dy = -1 },
-        { number = 9, dx =  1, dy = -1 },
-    }
-
-    local function activeTileCount()
-        return #TARGETS
-    end
-
-    local function updateTileButton()
-        if tileButton and tileButton.Parent then
-            tileButton.Text = "TARGET FIXED  |  TITIK 7, 8, 9"
-        end
-    end
+    -- [D] TARGET FIXED: TILE 7, 8, 9
+    --==================================================
 
     local function closePopup()
-        if popup then
-            popup:Destroy()
-            popup = nil
-        end
+        if popup then popup:Destroy(); popup = nil end
     end
 
+    --==================================================
     -- [E] APB V4 DISCOVERY (SAME WORKING SCAN LOGIC)
     --==================================================
 
@@ -498,243 +475,6 @@ return function(Hub)
     end
 
     --==================================================
-    -- [G] AUTO COLLECT HELPERS
-
-    local function getUpvalues(fn)
-        if debug and debug.getupvalues then
-            local ok, ups = pcall(debug.getupvalues, fn)
-            if ok and type(ups) == "table" then return ups end
-        end
-        local out = {}
-        local gu = (debug and debug.getupvalue) or getupvalue
-        if gu then
-            for i = 1, 60 do
-                local ok, value = pcall(gu, fn, i)
-                if not ok then break end
-                out[i] = value
-            end
-        end
-        return out
-    end
-
-    local function isDropList(t)
-        if type(t) ~= "table" or t == refs.World then return false end
-        local first = rawget(t, 1)
-        if first == nil then return next(t) == nil end
-        return type(first) == "table"
-            and rawget(first, "uid") ~= nil
-            and rawget(first, "frame") ~= nil
-    end
-
-    function Drops.findUpdate()
-        local world, list = refs.World, Drops.list
-        local dropTaken = world and rawget(world, "dropTaken")
-        if type(dropTaken) ~= "function" or not list then return false end
-        for _, upvalue in pairs(getUpvalues(dropTaken)) do
-            if type(upvalue) == "function" then
-                for _, nested in pairs(getUpvalues(upvalue)) do
-                    if rawequal(nested, list) then
-                        Drops.update = upvalue
-                        return true
-                    end
-                end
-            end
-        end
-        return false
-    end
-
-    local function findDropRefs()
-        local world = refs.World
-        local dropList = world and rawget(world, "dropList")
-        if type(dropList) == "function" then
-            local ok, list = pcall(dropList)
-            if ok and isDropList(list) then
-                if Drops.list ~= list then Drops.update = nil end
-                Drops.list = list
-                if not Drops.update then Drops.findUpdate() end
-                return true
-            end
-        end
-
-        if Drops.list then return true end
-        Drops.list, Drops.update = nil, nil
-
-        local dropTaken = refs.World and rawget(refs.World, "dropTaken")
-        if type(dropTaken) == "function" then
-            for _, upvalue in pairs(getUpvalues(dropTaken)) do
-                if not Drops.list and isDropList(upvalue) then
-                    Drops.list = upvalue
-                elseif not Drops.update and type(upvalue) == "function" then
-                    Drops.update = upvalue
-                end
-            end
-        end
-
-        local remotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
-        local event = remotes and remotes:FindFirstChild("DropTaken")
-        if not Drops.list and event and getconnections then
-            local ok, foundConnections = pcall(getconnections, event.OnClientEvent)
-            if ok and type(foundConnections) == "table" then
-                for _, connection in ipairs(foundConnections) do
-                    local okFn, fn = pcall(function() return connection.Function end)
-                    if okFn and type(fn) == "function" then
-                        for _, upvalue in pairs(getUpvalues(fn)) do
-                            if not Drops.list and isDropList(upvalue) then
-                                Drops.list = upvalue
-                            elseif not Drops.update and type(upvalue) == "function" then
-                                Drops.update = upvalue
-                            end
-                        end
-                    end
-                    if Drops.list then break end
-                end
-            end
-        end
-        return Drops.list ~= nil
-    end
-
-    function Drops.applyTaken(drop, left)
-        local list = Drops.list
-        if not list or not table.find(list, drop) then return end
-        if not Drops.update then Drops.findUpdate() end
-        if Drops.update then
-            local ok = pcall(Drops.update, drop, left)
-            if ok then
-                if left > 0 then
-                    drop.flown = nil
-                    if typeof(drop.frame) == "Instance" then
-                        pcall(function() drop.frame.Visible = not drop.culled end)
-                    end
-                end
-                return
-            end
-        end
-
-        drop.n = left
-        if left > 0 then
-            pcall(function()
-                if drop.setGem then
-                    drop.setGem(left)
-                elseif drop.count then
-                    drop.count:set(left > 1 and tostring(left) or "")
-                end
-            end)
-            drop.flown = nil
-            if typeof(drop.frame) == "Instance" then
-                pcall(function() drop.frame.Visible = not drop.culled end)
-            end
-        else
-            local index = table.find(list, drop)
-            if index then table.remove(list, index) end
-            if typeof(drop.frame) == "Instance" then
-                pcall(function() drop.frame:Destroy() end)
-            end
-        end
-    end
-
-    local function takeDrop(drop)
-        local worldTake = refs.World and rawget(refs.World, "takeDrop")
-        if type(worldTake) ~= "function" and not TakeDropRemote then return false end
-        if drop.taking or drop.pending or drop.display or (drop.n or 0) <= 0 then
-            return false
-        end
-        if drop.armed == false and drop.id ~= 112 then return false end
-
-        local now = os.clock()
-        if DropFailUntil[drop.uid] and now < DropFailUntil[drop.uid] then
-            return false
-        end
-
-        local amount = drop.n
-        if drop.id ~= 112 and refs.Inv then
-            local okRoom, room = pcall(function() return refs.Inv:room(drop.id) end)
-            if okRoom and type(room) == "number" then
-                amount = math.min(amount, room)
-            end
-        end
-        if amount <= 0 then
-            DropFailUntil[drop.uid] = now + 1
-            return false
-        end
-
-        drop.taking = true
-        if typeof(drop.frame) == "Instance" then
-            pcall(function() drop.frame.Visible = false end)
-        end
-
-        local ok, taken
-        if type(worldTake) == "function" then
-            ok, taken = pcall(worldTake, drop.uid, amount)
-        else
-            ok, taken = pcall(
-                TakeDropRemote.InvokeServer, TakeDropRemote, drop.uid, amount
-            )
-        end
-        drop.taking = false
-
-        if not (ok and type(taken) == "number" and taken > 0) then
-            drop.refused = os.clock()
-            drop.failN = (drop.failN or 0) + 1
-            DropFailUntil[drop.uid] = os.clock() + math.min(8, drop.failN)
-            drop.flown = nil
-            if typeof(drop.frame) == "Instance" then
-                pcall(function() drop.frame.Visible = not drop.culled end)
-            end
-            return false
-        end
-
-        DropFailUntil[drop.uid] = nil
-        if drop.id == 112 then
-            if refs.Gems then pcall(refs.Gems.addGems, taken) end
-        elseif refs.Inv then
-            pcall(function() refs.Inv:add(drop.id, taken) end)
-        end
-
-        Drops.applyTaken(drop, math.max(0, (drop.n or 0) - taken))
-        return true
-    end
-
-    local function inDropTile(tileX, tileY, dropX, dropY)
-        return dropX >= tileX - 0.15
-            and dropX < tileX + 1.15
-            and dropY >= tileY - 0.15
-            and dropY < tileY + 1.15
-    end
-
-    -- Koleksi satu tile secara serial untuk menjaga urutan 7 -> 8 -> 9.
-    local function collectTile(target, collectDelayMs)
-        if not Drops.list and not findDropRefs() then
-            return 0, "daftar drop belum ditemukan"
-        end
-        local list = Drops.list
-        if type(list) ~= "table" then return 0, "daftar drop tidak valid" end
-
-        local collected = 0
-        for i = #list, 1, -1 do
-            if not running or destroyed or Hub.IsClosing() then break end
-            local drop = list[i]
-
-            if type(drop) == "table"
-                and not drop.taking
-                and (drop.n or 0) > 0
-                and type(drop.x) == "number"
-                and type(drop.y) == "number"
-                and not (DropFailUntil[drop.uid]
-                    and os.clock() < DropFailUntil[drop.uid])
-                and (drop.armed ~= false or drop.id == 112)
-                and inDropTile(target.x, target.y, drop.x, drop.y) then
-
-                if takeDrop(drop) then
-                    collected += 1
-                end
-                if collectDelayMs > 0 then
-                    task.wait(collectDelayMs / 1000)
-                end
-            end
-        end
-        return collected, "selesai"
-    end
-
     -- [G] BUILD PLAN
     --==================================================
 
@@ -743,23 +483,18 @@ return function(Hub)
         if not px then return nil, "Posisi player tidak terbaca." end
 
         local plan = {}
-        for _, target in ipairs(TARGETS) do
-            local x, y = px + target.dx, py + target.dy
-            if x < 0 or y < 0
-                or x >= refs.World.w or y >= refs.World.h then
-                return nil, ("Titik %d (%d,%d) di luar world."):format(
-                    target.number, x, y
-                )
+        -- Grid 5x5 bernomor: target 7,8,9 = dx -1,0,1 dan dy -1.
+        for dx = -1, 1 do
+            local x, y = px + dx, py - 1
+            if x < 0 or y < 0 or x >= refs.World.w or y >= refs.World.h then
+                return nil, ("Koordinat tile %d di luar world."):format(dx + 8)
             end
-            plan[#plan + 1] = {
-                number = target.number,
-                x = x, y = y,
-                dx = target.dx, dy = target.dy,
-            }
+            plan[#plan + 1] = { x = x, y = y, dx = dx, dy = -1, tileNo = dx + 8 }
         end
         return plan, px, py
     end
 
+    --==================================================
     -- [H] PUT
     --==================================================
 
@@ -911,7 +646,292 @@ return function(Hub)
     end
 
     --==================================================
-    -- [J] DELAY VALIDATION
+    -- [J] AUTO COLLECT | HANYA TILE 7, 8, 9
+    -- Mekanisme remote dan update drop mengikuti uhuy.lua.
+    --==================================================
+
+    local function getUpvalues(fn)
+        if debug and debug.getupvalues then
+            local ok, ups = pcall(debug.getupvalues, fn)
+            if ok and type(ups) == "table" then return ups end
+        end
+        local out = {}
+        local gu = (debug and debug.getupvalue) or getupvalue
+        if gu then
+            for i = 1, 60 do
+                local ok, name, value = pcall(gu, fn, i)
+                if not ok or name == nil then break end
+                out[i] = value
+            end
+        end
+        return out
+    end
+
+    local function isDropList(t)
+        if type(t) ~= "table" or t == refs.World then return false end
+        local first = rawget(t, 1)
+        if first == nil then return next(t) == nil end
+        return type(first) == "table"
+            and rawget(first, "uid") ~= nil
+            and rawget(first, "frame") ~= nil
+    end
+
+    local function findDropRefs()
+        local world = refs.World
+        local dropListFn = world and raw(world, "dropList")
+        if type(dropListFn) == "function" then
+            local ok, listRef = pcall(dropListFn)
+            if ok and isDropList(listRef) then
+                if Drops.list ~= listRef then Drops.update = nil end
+                Drops.list = listRef
+            end
+        end
+
+        if not Drops.list then
+            local dropTaken = world and raw(world, "dropTaken")
+            if type(dropTaken) == "function" then
+                for _, upvalue in pairs(getUpvalues(dropTaken)) do
+                    if not Drops.list and isDropList(upvalue) then
+                        Drops.list = upvalue
+                    elseif not Drops.update and type(upvalue) == "function" then
+                        for _, nested in pairs(getUpvalues(upvalue)) do
+                            if type(nested) == "table" and isDropList(nested) then
+                                Drops.list = nested
+                                Drops.update = upvalue
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if Drops.list and not Drops.update then
+            local dropTaken = world and raw(world, "dropTaken")
+            if type(dropTaken) == "function" then
+                for _, upvalue in pairs(getUpvalues(dropTaken)) do
+                    if type(upvalue) == "function" then
+                        for _, nested in pairs(getUpvalues(upvalue)) do
+                            if rawequal(nested, Drops.list) then
+                                Drops.update = upvalue
+                                break
+                            end
+                        end
+                    end
+                    if Drops.update then break end
+                end
+            end
+        end
+
+        -- Fallback yang juga dipakai modul uhuy.lua: cari drop list dari
+        -- listener event DropTaken bila World.dropList/upvalue tidak tersedia.
+        if not Drops.list and getconnections then
+            local remotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
+            local event = remotes and remotes:FindFirstChild("DropTaken")
+            if event then
+                local ok, listeners = pcall(getconnections, event.OnClientEvent)
+                if ok and type(listeners) == "table" then
+                    for _, connection in ipairs(listeners) do
+                        local got, callback = pcall(function() return connection.Function end)
+                        if got and type(callback) == "function" then
+                            for _, upvalue in pairs(getUpvalues(callback)) do
+                                if not Drops.list and isDropList(upvalue) then
+                                    Drops.list = upvalue
+                                elseif not Drops.update and type(upvalue) == "function" then
+                                    for _, nested in pairs(getUpvalues(upvalue)) do
+                                        if Drops.list and rawequal(nested, Drops.list) then
+                                            Drops.update = upvalue
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if Drops.list then break end
+                    end
+                end
+            end
+        end
+        return Drops.list ~= nil
+    end
+
+    local function applyTaken(drop, left)
+        local listRef = Drops.list
+        if not listRef or not table.find(listRef, drop) then return end
+        if Drops.update then
+            local ok = pcall(Drops.update, drop, left)
+            if ok then
+                if left > 0 then
+                    drop.flown = nil
+                    if typeof(drop.frame) == "Instance" then
+                        pcall(function() drop.frame.Visible = not drop.culled end)
+                    end
+                end
+                return
+            end
+        end
+        drop.n = left
+        if left > 0 then
+            drop.flown = nil
+            if typeof(drop.frame) == "Instance" then
+                pcall(function() drop.frame.Visible = not drop.culled end)
+            end
+        else
+            local index = table.find(listRef, drop)
+            if index then table.remove(listRef, index) end
+            if typeof(drop.frame) == "Instance" then
+                pcall(function() drop.frame:Destroy() end)
+            end
+        end
+    end
+
+    local function inTargetTile(drop, target)
+        return type(drop.x) == "number" and type(drop.y) == "number"
+            and drop.x >= target.x - 0.15 and drop.x < target.x + 1.15
+            and drop.y >= target.y - 0.15 and drop.y < target.y + 1.15
+    end
+
+    local function takeDrop(drop)
+        local worldTake = refs.World and raw(refs.World, "takeDrop")
+        if type(worldTake) ~= "function" and not TakeDropRemote then
+            return false, "fungsi takeDrop/remote tidak ditemukan"
+        end
+        if drop.taking or drop.pending or drop.display or (drop.n or 0) <= 0 then
+            return false, "drop sedang diproses atau kosong"
+        end
+        if drop.armed == false and drop.id ~= 112 then
+            return false, "drop tidak eligible (armed=false)"
+        end
+
+        local now = os.clock()
+        if DropFailUntil[drop.uid] and now < DropFailUntil[drop.uid] then
+            return false, "UID masih dalam cooldown gagal"
+        end
+
+        local amount = drop.n
+        if drop.id ~= 112 and refs.Inv then
+            local roomOk, room = pcall(function() return refs.Inv:room(drop.id) end)
+            if roomOk and type(room) == "number" then amount = math.min(amount, room) end
+        end
+        if amount <= 0 then
+            DropFailUntil[drop.uid] = now + 1
+            return false, "inventory penuh"
+        end
+
+        local beforeN = tonumber(drop.n) or 0
+        drop.taking = true
+        if typeof(drop.frame) == "Instance" then
+            pcall(function() drop.frame.Visible = false end)
+        end
+
+        local ok, taken
+        if type(worldTake) == "function" then
+            ok, taken = pcall(worldTake, drop.uid, amount)
+        else
+            ok, taken = pcall(TakeDropRemote.InvokeServer, TakeDropRemote, drop.uid, amount)
+        end
+        drop.taking = false
+
+        if not (ok and type(taken) == "number" and taken > 0) then
+            drop.refused = os.clock()
+            drop.failN = (drop.failN or 0) + 1
+            DropFailUntil[drop.uid] = os.clock() + math.min(8, drop.failN)
+            drop.flown = nil
+            if typeof(drop.frame) == "Instance" then
+                pcall(function() drop.frame.Visible = not drop.culled end)
+            end
+            return false, ok and ("server return: " .. tostring(taken)) or tostring(taken)
+        end
+
+        DropFailUntil[drop.uid] = nil
+        if drop.id ~= 112 and refs.Inv then
+            pcall(function() refs.Inv:add(drop.id, taken) end)
+        end
+        applyTaken(drop, math.max(0, beforeN - taken))
+        return true, ("UID %s taken %d/%d"):format(tostring(drop.uid), taken, beforeN)
+    end
+
+    local function dropsAtTarget(target)
+        local found = {}
+        local listRef = Drops.list
+        if type(listRef) ~= "table" then return found end
+        for _, drop in ipairs(listRef) do
+            if type(drop) == "table" and (tonumber(drop.n) or 0) > 0
+                and inTargetTile(drop, target) then
+                found[#found + 1] = drop
+            end
+        end
+        return found
+    end
+
+    local function collectTarget(target, timeoutSeconds, anchorX, anchorY)
+        local deadline = os.clock() + timeoutSeconds
+        local attempts = 0
+        while running and not destroyed and not Hub.IsClosing() do
+            local currentX, currentY = playerTile()
+            if not currentX or currentX ~= anchorX or currentY ~= anchorY then
+                return false, "posisi player berubah dari anchor"
+            end
+            if not Drops.list and not findDropRefs() then
+                task.wait(0.2)
+            else
+                local found = dropsAtTarget(target)
+                if #found == 0 then
+                    -- Pastikan daftar drop tetap kosong pada beberapa pembacaan.
+                    local stable = true
+                    -- Tunggu 1.6 detik tanpa drop agar item yang muncul
+                    -- sedikit terlambat setelah BREAK tidak terlewat.
+                    for _ = 1, 8 do
+                        task.wait(0.2)
+                        if #dropsAtTarget(target) > 0 then stable = false; break end
+                    end
+                    if stable then return true, "tile bersih; tidak ada drop tersisa" end
+                else
+                    for _, drop in ipairs(found) do
+                        if not running or destroyed or Hub.IsClosing() then
+                            return false, "collect dihentikan"
+                        end
+                        attempts += 1
+                        local ok, message = takeDrop(drop)
+                        if not ok and (drop.n or 0) > 0 then
+                            -- Jangan tandai tile selesai jika drop masih terlihat.
+                            report(("COLLECT TILE %d: menunggu UID %s | %s"):format(
+                                target.tileNo, tostring(drop.uid), tostring(message)
+                            ))
+                        end
+                        task.wait(0.12)
+                    end
+                end
+            end
+
+            if os.clock() >= deadline then
+                local remaining = #dropsAtTarget(target)
+                return false, ("timeout; %d drop masih ada setelah %d percobaan"):format(remaining, attempts)
+            end
+        end
+        return false, "collect dihentikan"
+    end
+
+    local function collectPhase(plan, anchorX, anchorY)
+        if not findDropRefs() then
+            return false, "daftar drop tidak ditemukan"
+        end
+        for _, target in ipairs(plan) do
+            if not running or destroyed or Hub.IsClosing() then
+                return false, "collect dihentikan"
+            end
+            report(("COLLECT TILE %d (%d,%d)"):format(target.tileNo, target.x, target.y))
+            local ok, message = collectTarget(target, 15, anchorX, anchorY)
+            if not ok then
+                return false, ("tile %d gagal: %s"):format(target.tileNo, tostring(message))
+            end
+            report(("COLLECT TILE %d OK: %s"):format(target.tileNo, tostring(message)))
+        end
+        return true, "semua drop pada tile 7, 8, 9 sudah diambil"
+    end
+
+    --==================================================
+    -- [K] DELAY VALIDATION
     --==================================================
 
     local function readDelay(box, minimum, maximum)
@@ -926,7 +946,7 @@ return function(Hub)
     end
 
     --==================================================
-    -- [K] BUTTON EVENTS
+    -- [L] BUTTON EVENTS
     --==================================================
 
     track(scanButton.Activated:Connect(function()
@@ -943,7 +963,6 @@ return function(Hub)
             if destroyed or Hub.IsClosing() then return end
 
             report(ok and message or ("SCAN GAGAL: " .. message))
-            if ok then findDropRefs() end
 
             if refs.Inv then
                 local id = selectedId()
@@ -999,11 +1018,11 @@ return function(Hub)
 
         local coords = {}
         for i, p in ipairs(plan) do
-            coords[#coords + 1] = ("%d:(%d,%d)"):format(p.number, p.x, p.y)
+            coords[#coords + 1] = ("%d:(%d,%d)"):format(i, p.x, p.y)
         end
 
-        report(("Anchor player %d,%d | target 7,8,9 | %s"):format(
-            px, py, table.concat(coords, " ")
+        report(("Anchor player %d,%d | %d target | %s"):format(
+            px, py, #plan, table.concat(coords, " ")
         ))
     end))
 
@@ -1026,26 +1045,23 @@ return function(Hub)
             return
         end
 
-        if not findDropRefs() then
-            report("Daftar drop belum ditemukan. Scan ulang sebelum START.")
-            return
-        end
-
         local putMs, e1 = readDelay(putDelayBox, 0, 10000)
         local hitMs, e2 = readDelay(breakDelayBox, 1, 10000)
         local startMs, e3 = readDelay(breakStartBox, 50, 10000)
         local cycleMs, e4 = readDelay(cycleDelayBox, 0, 60000)
-        local collectMs, e5 = readDelay(collectDelayBox, 0, 10000)
 
         if not putMs then report(e1) return end
         if not hitMs then report(e2) return end
         if not startMs then report(e3) return end
         if not cycleMs then report(e4) return end
-        if not collectMs then report(e5) return end
 
         local plan, px, py = buildPlan()
         if not plan then
             report("START dibatalkan: " .. tostring(px))
+            return
+        end
+        if not findDropRefs() then
+            report("START dibatalkan: daftar drop belum ditemukan.")
             return
         end
 
@@ -1055,8 +1071,8 @@ return function(Hub)
         task.spawn(function()
             local cycle = 0
 
-            report(("LOOP START | anchor %d,%d | ID %d | TARGET 7,8,9"):format(
-                px, py, confirmedId
+            report(("LOOP START | anchor %d,%d | ID %d | %d target"):format(
+                px, py, confirmedId, #plan
             ))
 
             while running and not destroyed and not Hub.IsClosing() do
@@ -1065,7 +1081,7 @@ return function(Hub)
                 local breakQueue = {}
                 local hasEmptyTargetWithoutItem = false
 
-                report(("SIKLUS %d | FASE PUT: 7 -> 8 -> 9"):format(cycle))
+                report(("SIKLUS %d | FASE PUT / CEK TILE"):format(cycle))
 
                 for index, p in ipairs(plan) do
                     if not running or destroyed or Hub.IsClosing() then break end
@@ -1101,7 +1117,7 @@ return function(Hub)
                             if placed then
                                 breakQueue[#breakQueue + 1] = p
                                 report(("SIKLUS %d | PUT %d/%d OK (%d,%d)"):format(
-                                    cycle, p.number, #plan, p.x, p.y
+                                    cycle, index, #plan, p.x, p.y
                                 ))
                             else
                                 local checkFg = tileAt("fg", p.x, p.y)
@@ -1137,7 +1153,7 @@ return function(Hub)
                     break
                 end
 
-                report(("SIKLUS %d | FASE BREAK: titik 7 -> 8 -> 9 (%d tile)"):format(
+                report(("SIKLUS %d | FASE BREAK: %d tile"):format(
                     cycle, #breakQueue
                 ))
 
@@ -1155,8 +1171,8 @@ return function(Hub)
                         p.x, p.y, startMs, hitMs
                     )
 
-                    report(("SIKLUS %d | BREAK titik %d (%d/%d) %s (%d,%d): %s"):format(
-                        cycle, p.number, index, #breakQueue,
+                    report(("SIKLUS %d | BREAK %d/%d %s (%d,%d): %s"):format(
+                        cycle, index, #breakQueue,
                         broken and "OK" or "GAGAL",
                         p.x, p.y, tostring(breakMessage)
                     ))
@@ -1167,24 +1183,15 @@ return function(Hub)
                     end
                 end
 
-                if not running or destroyed or Hub.IsClosing() then break end
-
-                report(("SIKLUS %d | FASE COLLECT: 7 -> 8 -> 9"):format(cycle))
-                for index, p in ipairs(plan) do
-                    if not running or destroyed or Hub.IsClosing() then break end
-
-                    local cx, cy = playerTile()
-                    if not cx or cx ~= px or cy ~= py then
+                if running and not destroyed and not Hub.IsClosing() then
+                    report(("SIKLUS %d | FASE COLLECT: TILE 7, 8, 9"):format(cycle))
+                    local collected, collectMessage = collectPhase(plan, px, py)
+                    if not collected then
                         running = false
-                        report("STOP AMAN: posisi player berubah dari anchor.")
+                        report(("STOP AMAN | COLLECT BELUM TUNTAS: %s"):format(tostring(collectMessage)))
                         break
                     end
-
-                    local count, collectMessage = collectTile(p, collectMs)
-                    report(("SIKLUS %d | COLLECT titik %d (%d/%d) | %d drop | %s"):format(
-                        cycle, p.number, index, #plan,
-                        count, tostring(collectMessage or "selesai")
-                    ))
+                    report(("SIKLUS %d | COLLECT SELESAI: %s"):format(cycle, tostring(collectMessage)))
                 end
 
                 if running and cycleMs > 0 then
@@ -1198,7 +1205,7 @@ return function(Hub)
     end))
 
     --==================================================
-    -- [L] INITIAL SCAN + INVENTORY DISPLAY
+    -- [M] INITIAL SCAN + INVENTORY DISPLAY
     --==================================================
 
     task.spawn(function()
@@ -1218,10 +1225,6 @@ return function(Hub)
         end
 
         report(scanOk and message or ("SCAN GAGAL: " .. tostring(message)))
-
-        if scanOk and not findDropRefs() then
-            report("World siap, masukkan daftar drop saat tersedia.")
-        end
 
         if refs.Inv then
             local id = selectedId()
@@ -1268,7 +1271,7 @@ return function(Hub)
     end)
 
     --==================================================
-    -- [M] CLEANUP
+    -- [N] CLEANUP
     --==================================================
 
     local function cleanup()
@@ -1287,14 +1290,12 @@ return function(Hub)
     end
 
     Hub.RegisterCleanup(cleanup)
-    updateTileButton()
-
-    print("[APB + AUTO COLLECT 7-8-9] submenu loaded.")
+    print("[APB+COLLECT] PUT + BREAK + COLLECT submenu loaded.")
 
     end)
 
 end -- return function(Hub)
 
 --==================================================
--- END MODULE: AUTO PUT + BREAK + AUTO COLLECT 7-8-9
+-- END MODULE: AUTO PUT + BREAK + COLLECT
 --==================================================
