@@ -1,551 +1,405 @@
 --==================================================
--- MODULE: AUTO COLLECT 5x5 REMOTE (WITH DEBUGGER)
--- Melacak fungsi take/remote yang aktif di game
+-- MODULE: AUTO COLLECT SCANNER (GROWBLOX HUB)
+-- Read-only diagnostic scanner.
+-- Does NOT invoke game functions or fire remotes.
 --==================================================
 
 return function(Hub)
+    Hub.RegisterTab("AutoCollect Scanner", function(page)
+        local Players = game:GetService("Players")
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local Workspace = game:GetService("Workspace")
+        local LocalPlayer = Players.LocalPlayer
 
-    Hub.RegisterTab("Auto Collect", function(page)
+        local Theme = {
+            Background = Color3.fromRGB(250, 220, 228),
+            Panel = Color3.fromRGB(239, 194, 207),
+            PanelDark = Color3.fromRGB(222, 164, 183),
+            Accent = Color3.fromRGB(171, 91, 119),
+            Text = Color3.fromRGB(76, 43, 57),
+            Muted = Color3.fromRGB(139, 96, 111),
+            White = Color3.fromRGB(255, 249, 251),
+            Green = Color3.fromRGB(55, 140, 90),
+            Red = Color3.fromRGB(180, 65, 75),
+        }
 
-    --==================================================
-    -- [A] CONFIGURATION & STATE
-    --==================================================
+        local destroyed = false
+        local lines = {}
+        local output
+        local MAX_LOG_LINES = 500
+        local MAX_GC_OBJECTS = 30000
+        local MAX_DESCENDANTS = 15000
 
-    local Theme = {
-        Background = Color3.fromRGB(250, 220, 228),
-        Panel = Color3.fromRGB(239, 194, 207),
-        PanelDark = Color3.fromRGB(222, 164, 183),
-        Accent = Color3.fromRGB(171, 91, 119),
-        Text = Color3.fromRGB(76, 43, 57),
-        Muted = Color3.fromRGB(139, 96, 111),
-        White = Color3.fromRGB(255, 249, 251),
-        Green = Color3.fromRGB(55, 140, 90),
-        Red = Color3.fromRGB(180, 65, 75),
-    }
-
-    local running = false
-    local destroyed = false
-
-    local refs = {
-        State = nil,
-        DropsContainer = nil,
-        TakeFn = nil,
-    }
-
-    local enabledTiles = {}
-    for dx = -2, 2 do
-        for dy = -2, 2 do
-            enabledTiles[dx .. "," .. dy] = true
+        local function create(className, properties, parent)
+            local object = Instance.new(className)
+            for property, value in pairs(properties or {}) do
+                object[property] = value
+            end
+            object.Parent = parent
+            return object
         end
-    end
 
-    local connections = {}
-    local popup = nil
-    local statusLabel
-    local tileButton
-
-    local function report(message)
-        message = tostring(message)
-        if statusLabel and statusLabel.Parent then
-            statusLabel.Text = "Status: " .. message
+        local function corner(object, radius)
+            local c = Instance.new("UICorner")
+            c.CornerRadius = UDim.new(0, radius or 7)
+            c.Parent = object
         end
-        print("[AutoCollect]", message)
-    end
 
-    local function track(connection)
-        table.insert(connections, connection)
-        return connection
-    end
-
-    --==================================================
-    -- [B] UI HELPERS
-    --==================================================
-
-    local function create(className, properties, parent)
-        local object = Instance.new(className)
-        for property, value in pairs(properties or {}) do
-            object[property] = value
+        local function append(message)
+            if destroyed or Hub.IsClosing() then return end
+            local stamp = os.date("%H:%M:%S")
+            table.insert(lines, ("[%s] %s"):format(stamp, tostring(message)))
+            while #lines > MAX_LOG_LINES do
+                table.remove(lines, 1)
+            end
+            if output and output.Parent then
+                output.Text = table.concat(lines, "\n")
+                output.CursorPosition = -1
+            end
+            print("[AC-SCANNER] " .. tostring(message))
         end
-        object.Parent = parent
-        return object
-    end
 
-    local function corner(object, radius)
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(0, radius or 7)
-        c.Parent = object
-        return c
-    end
+        local function clearLog()
+            table.clear(lines)
+            if output and output.Parent then output.Text = "" end
+            append("Log dibersihkan.")
+        end
 
-    local function makeLabel(text, height, parent)
-        return create("TextLabel", {
-            Size = UDim2.new(1, 0, 0, height or 25),
+        local function makeButton(label, color, parent)
+            local b = create("TextButton", {
+                Size = UDim2.new(1, 0, 0, 34),
+                BackgroundColor3 = color or Theme.Accent,
+                BorderSizePixel = 0,
+                Text = label,
+                TextColor3 = Theme.White,
+                Font = Enum.Font.GothamBold,
+                TextSize = 11,
+                AutoButtonColor = true,
+            }, parent or page)
+            corner(b, 7)
+            return b
+        end
+
+        local layout = create("UIListLayout", {
+            Padding = UDim.new(0, 7),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, page)
+
+        local intro = create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 48),
             BackgroundTransparency = 1,
-            Text = text or "",
-            TextColor3 = Theme.Text,
-            Font = Enum.Font.Gotham,
-            TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextYAlignment = Enum.TextYAlignment.Center,
-            TextWrapped = true,
-        }, parent or page)
-    end
-
-    local function makeButton(text, height, parent, color)
-        local b = create("TextButton", {
-            Size = UDim2.new(1, 0, 0, height or 32),
-            BackgroundColor3 = color or Theme.Accent,
-            BorderSizePixel = 0,
-            Text = text,
-            TextColor3 = Theme.White,
-            Font = Enum.Font.GothamBold,
-            TextSize = 11,
-            AutoButtonColor = true,
-        }, parent or page)
-        corner(b, 7)
-        return b
-    end
-
-    local function makeDelayBox(caption, value, parent)
-        local row = create("Frame", {
-            Size = UDim2.new(1, 0, 0, 42),
-            BackgroundTransparency = 1,
-        }, parent)
-
-        create("TextLabel", {
-            Size = UDim2.new(0.58, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text = caption,
+            Text = "READ-ONLY SCANNER | Mencari petunjuk fungsi, remote, dan objek dropped item. Tidak menjalankan remote apa pun.",
             TextColor3 = Theme.Text,
             Font = Enum.Font.Gotham,
             TextSize = 10,
+            TextWrapped = true,
             TextXAlignment = Enum.TextXAlignment.Left,
-        }, row)
+            TextYAlignment = Enum.TextYAlignment.Center,
+        }, page)
 
-        local box = create("TextBox", {
-            AnchorPoint = Vector2.new(1, 0.5),
-            Position = UDim2.new(1, 0, 0.5, 0),
-            Size = UDim2.new(0.38, 0, 0, 29),
-            BackgroundColor3 = Theme.Background,
+        local status = create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 25),
+            BackgroundColor3 = Theme.Panel,
             BorderSizePixel = 0,
-            Text = tostring(value),
-            PlaceholderText = "ms",
+            Text = "Status: siap",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, page)
+        corner(status, 6)
+
+        output = create("TextBox", {
+            Size = UDim2.new(1, 0, 0, 260),
+            BackgroundColor3 = Color3.fromRGB(255, 245, 248),
+            BorderSizePixel = 0,
+            Text = "[AC-SCANNER] Siap. Tekan salah satu tombol scan.\n",
             TextColor3 = Theme.Text,
             PlaceholderColor3 = Theme.Muted,
-            Font = Enum.Font.Gotham,
-            TextSize = 11,
-            ClearTextOnFocus = false,
-        }, row)
-        corner(box, 6)
-        return box
-    end
-
-    --==================================================
-    -- [C] MAIN SUBMENU UI
-    --==================================================
-
-    create("UIListLayout", {
-        Padding = UDim.new(0, 7),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, page)
-
-    statusLabel = makeLabel("Status: siap (Tekan Scan Take untuk deteksi fungsi)", 34)
-    statusLabel.LayoutOrder = 1
-
-    local areaLabel = makeLabel("Area target: 5 x 5 (Termasuk player di tengah)", 24)
-    areaLabel.LayoutOrder = 2
-
-    tileButton = makeButton("PILIH TILE  |  25 TARGET AKTIF", 34)
-    tileButton.LayoutOrder = 3
-
-    local scanTakeButton = makeButton("SCAN FUNGSI TAKE (F9 CONSOLE)", 32, page, Theme.PanelDark)
-    scanTakeButton.TextColor3 = Theme.Text
-    scanTakeButton.LayoutOrder = 4
-
-    local startButton = makeButton("START AUTO COLLECT", 36, page, Theme.Green)
-    startButton.LayoutOrder = 5
-
-    local stopButton = makeButton("STOP", 32, page, Theme.Red)
-    stopButton.LayoutOrder = 6
-
-    local settingsButton = makeButton("PENGATURAN DELAY  ▼", 30, page, Theme.PanelDark)
-    settingsButton.TextColor3 = Theme.Text
-    settingsButton.LayoutOrder = 7
-
-    local settingsFrame = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundColor3 = Theme.Panel,
-        BorderSizePixel = 0,
-        Visible = false,
-        LayoutOrder = 8,
-    }, page)
-    corner(settingsFrame, 8)
-
-    create("UIPadding", {
-        PaddingTop = UDim.new(0, 7),
-        PaddingBottom = UDim.new(0, 7),
-        PaddingLeft = UDim.new(0, 8),
-        PaddingRight = UDim.new(0, 8),
-    }, settingsFrame)
-
-    create("UIListLayout", {
-        Padding = UDim.new(0, 4),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-    }, settingsFrame)
-
-    local collectDelayBox = makeDelayBox("Jeda antar Collect (ms)", 50, settingsFrame)
-
-    track(settingsButton.Activated:Connect(function()
-        settingsFrame.Visible = not settingsFrame.Visible
-        settingsButton.Text = settingsFrame.Visible and "PENGATURAN DELAY  ▲" or "PENGATURAN DELAY  ▼"
-    end))
-
-    --==================================================
-    -- [D] TILE SELECT POPUP (DENGAN TOMBOL SILANG / X)
-    --==================================================
-
-    local function activeTileCount()
-        local count = 0
-        for dy = -2, 2 do
-            for dx = -2, 2 do
-                if enabledTiles[dx .. "," .. dy] ~= false then
-                    count += 1
-                end
-            end
-        end
-        return count
-    end
-
-    local function updateTileButton()
-        if tileButton and tileButton.Parent then
-            tileButton.Text = ("PILIH TILE  |  %d TARGET AKTIF"):format(activeTileCount())
-        end
-    end
-
-    local function closePopup()
-        if popup then
-            popup:Destroy()
-            popup = nil
-        end
-    end
-
-    local function openPopup()
-        if destroyed or popup then return end
-        local screenGui = Hub.GetGui()
-        if not screenGui then return end
-
-        popup = create("Frame", {
-            Name = "AutoCollectPopup",
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromOffset(290, 290),
-            BackgroundColor3 = Theme.Background,
-            BorderSizePixel = 0,
-            ZIndex = 200,
-        }, screenGui)
-        corner(popup, 10)
-
-        create("TextLabel", {
-            Position = UDim2.fromOffset(10, 5),
-            Size = UDim2.new(1, -55, 0, 30),
-            BackgroundTransparency = 1,
-            Text = "PILIH TILE COLLECT (5x5)",
-            TextColor3 = Theme.Text,
-            Font = Enum.Font.GothamBold,
-            TextSize = 13,
+            Font = Enum.Font.Code,
+            TextSize = 10,
             TextXAlignment = Enum.TextXAlignment.Left,
-            ZIndex = 201,
-        }, popup)
+            TextYAlignment = Enum.TextYAlignment.Top,
+            TextWrapped = false,
+            MultiLine = true,
+            ClearTextOnFocus = false,
+            TextEditable = false,
+        }, page)
+        corner(output, 7)
 
-        local closeButton = create("TextButton", {
-            AnchorPoint = Vector2.new(1, 0),
-            Position = UDim2.new(1, -8, 0, 7),
-            Size = UDim2.fromOffset(30, 27),
-            BackgroundColor3 = Theme.Red,
-            BorderSizePixel = 0,
-            Text = "X",
-            TextColor3 = Theme.White,
-            Font = Enum.Font.GothamBold,
-            TextSize = 12,
-            ZIndex = 201,
-        }, popup)
-        corner(closeButton, 6)
-
-        local grid = create("Frame", {
-            Position = UDim2.fromOffset(18, 45),
-            Size = UDim2.fromOffset(254, 185),
-            BackgroundTransparency = 1,
-            ZIndex = 201,
-        }, popup)
-
-        create("UIGridLayout", {
-            CellSize = UDim2.fromOffset(48, 33),
-            CellPadding = UDim2.fromOffset(3, 3),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, grid)
-
-        for dy = -2, 2 do
-            for dx = -2, 2 do
-                local b = create("TextButton", {
-                    BackgroundColor3 = Theme.Green,
-                    BorderSizePixel = 0,
-                    Text = "",
-                    TextColor3 = Theme.White,
-                    Font = Enum.Font.GothamBold,
-                    TextSize = 10,
-                    ZIndex = 202,
-                }, grid)
-                corner(b, 6)
-
-                if dx == 0 and dy == 0 then
-                    b.Text = "YOU"
-                    b.BackgroundColor3 = Theme.PanelDark
-                end
-
-                local key = dx .. "," .. dy
-                if enabledTiles[key] == nil then
-                    enabledTiles[key] = true
-                end
-
-                local function paint()
-                    local on = enabledTiles[key] ~= false
-                    if dx == 0 and dy == 0 then
-                        b.Text = "YOU"
-                    else
-                        b.Text = on and "ON" or "OFF"
-                    end
-                    b.BackgroundColor3 = on and Theme.Green or Theme.PanelDark
-                end
-                paint()
-
-                track(b.Activated:Connect(function()
-                    if running or destroyed then return end
-                    enabledTiles[key] = not (enabledTiles[key] ~= false)
-                    paint()
-                    updateTileButton()
-                end))
-            end
+        local function setStatus(value)
+            status.Text = "Status: " .. tostring(value)
         end
 
-        create("TextLabel", {
-            Position = UDim2.new(0, 10, 1, -35),
-            Size = UDim2.new(1, -20, 0, 25),
-            BackgroundTransparency = 1,
-            Text = "Hijau = aktif (diambil) | Abu = nonaktif",
-            TextColor3 = Theme.Muted,
-            Font = Enum.Font.Gotham,
-            TextSize = 9,
-            ZIndex = 201,
-        }, popup)
+        local function getConstants(fn)
+            local getter = (debug and debug.getconstants) or getconstants or getconsts
+            if type(getter) ~= "function" then return nil end
+            local ok, result = pcall(getter, fn)
+            return ok and type(result) == "table" and result or nil
+        end
 
-        track(closeButton.Activated:Connect(closePopup))
-    end
+        local function getUpvalues(fn)
+            local getter = (debug and debug.getupvalues) or getupvalues or getupvals
+            if type(getter) ~= "function" then return nil end
+            local ok, result = pcall(getter, fn)
+            return ok and type(result) == "table" and result or nil
+        end
 
-    track(tileButton.Activated:Connect(openPopup))
+        local function functionInfo(fn)
+            local name, params, variadic = "?", "?", "?"
+            if debug and type(debug.info) == "function" then
+                local okN, n = pcall(debug.info, fn, "n")
+                local okA, a, v = pcall(debug.info, fn, "a")
+                if okN and n ~= nil and n ~= "" then name = tostring(n) end
+                if okA then
+                    params = tostring(a)
+                    variadic = tostring(v)
+                end
+            end
+            return name, params, variadic
+        end
 
-    --==================================================
-    -- [E] DISCOVERY & DEBUGGER FUNGSI TAKE
-    --==================================================
+        local KEYWORDS = {
+            "collect", "pickup", "pick_up", "take", "grab", "loot",
+            "drop", "dropped", "item", "gem", "seed", "harvest",
+            "touch", "proximity", "inventory", "remove", "claim",
+            "receive", "reward", "spawn", "worlditem", "world_item",
+        }
 
-    local function raw(t, k)
-        if type(t) ~= "table" then return nil end
-        local ok, value = pcall(rawget, t, k)
-        return ok and value or nil
-    end
+        local function keywordHits(value)
+            local s = string.lower(tostring(value))
+            local hits = {}
+            for _, word in ipairs(KEYWORDS) do
+                if string.find(s, word, 1, true) then
+                    hits[#hits + 1] = word
+                end
+            end
+            return hits
+        end
 
-    local function discover()
-        if type(getgc) ~= "function" then return end
-        local ok, objects = pcall(getgc, true)
-        if not ok or type(objects) ~= "table" then return end
+        local function safeString(value, limit)
+            local ok, result = pcall(tostring, value)
+            if not ok then return "<tostring error>" end
+            result = result:gsub("\n", " "):gsub("\r", " ")
+            limit = limit or 110
+            if #result > limit then result = result:sub(1, limit) .. "..." end
+            return result
+        end
 
-        refs.State = nil
-        refs.DropsContainer = nil
-        refs.TakeFn = nil
+        local function scanCapabilities()
+            append("=== EXECUTOR CAPABILITIES ===")
+            local checks = {
+                "getgc", "getconstants", "getconsts", "getupvalues",
+                "getupvals", "setclipboard", "toclipboard", "gethui",
+            }
+            for _, name in ipairs(checks) do
+                local value = (getgenv and getgenv()[name]) or _G[name]
+                append(name .. " = " .. (type(value) == "function" and "AVAILABLE" or "not found"))
+            end
+            append("debug.info = " .. tostring(debug and type(debug.info) == "function"))
+            append("debug.getconstants = " .. tostring(debug and type(debug.getconstants) == "function"))
+        end
 
-        for _, obj in ipairs(objects) do
-            if type(obj) == "table" then
-                if not refs.State then
-                    local stateFn = raw(obj, "state")
-                    if type(stateFn) == "function" then
-                        local good, state = pcall(stateFn)
-                        if good and type(state) == "table" and type(state.x) == "number" and type(state.y) == "number" then
-                            refs.State = stateFn
+        local function scanRemotes()
+            append("=== REMOTE INSTANCE SCAN ===")
+            local total, matched = 0, 0
+            local ok, descendants = pcall(function() return game:GetDescendants() end)
+            if not ok or type(descendants) ~= "table" then
+                append("GAGAL membaca game:GetDescendants(): " .. safeString(descendants))
+                return
+            end
+            for _, obj in ipairs(descendants) do
+                total += 1
+                if total > MAX_DESCENDANTS then
+                    append("Batas descendant tercapai: " .. MAX_DESCENDANTS)
+                    break
+                end
+                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                    matched += 1
+                    local path = "?"
+                    pcall(function() path = obj:GetFullName() end)
+                    append(("REMOTE %s | %s | %s"):format(obj.ClassName, obj.Name, path))
+                end
+            end
+            append(("Remote ditemukan: %d | descendant diperiksa: %d"):format(matched, math.min(total, MAX_DESCENDANTS)))
+            append("Catatan: nama remote saja tidak membuktikan remote tersebut untuk collect.")
+        end
+
+        local function scanFunctions()
+            append("=== GC FUNCTION SCAN ===")
+            local gc = getgc
+            if type(gc) ~= "function" then
+                append("getgc tidak tersedia di executor ini.")
+                return
+            end
+            local ok, objects = pcall(gc, true)
+            if not ok or type(objects) ~= "table" then
+                append("getgc(true) gagal: " .. safeString(objects))
+                return
+            end
+
+            local scanned, matched = 0, 0
+            for _, obj in ipairs(objects) do
+                if scanned >= MAX_GC_OBJECTS then
+                    append("Batas GC tercapai: " .. MAX_GC_OBJECTS)
+                    break
+                end
+                if type(obj) == "function" then
+                    scanned += 1
+                    local name, params, variadic = functionInfo(obj)
+                    local constants = getConstants(obj)
+                    local upvalues = getUpvalues(obj)
+                    local hits, evidence = {}, {}
+
+                    for _, value in pairs(constants or {}) do
+                        local found = keywordHits(value)
+                        for _, word in ipairs(found) do hits[word] = true end
+                        if #found > 0 then
+                            evidence[#evidence + 1] = "const=" .. safeString(value, 70)
+                        end
+                    end
+                    for key, value in pairs(upvalues or {}) do
+                        local keyHits = keywordHits(key)
+                        local valueHits = keywordHits(value)
+                        for _, word in ipairs(keyHits) do hits[word] = true end
+                        for _, word in ipairs(valueHits) do hits[word] = true end
+                        if #keyHits > 0 or #valueHits > 0 then
+                            evidence[#evidence + 1] = "upvalue[" .. safeString(key, 35) .."]=" .. safeString(value, 70)
+                        end
+                    end
+                    for word in pairs(keywordHits(name)) do hits[word] = true end
+
+                    local hitList = {}
+                    for word in pairs(hits) do hitList[#hitList + 1] = word end
+                    table.sort(hitList)
+                    if #hitList > 0 then
+                        matched += 1
+                        append(("FUNC #%d name=%s args=%s variadic=%s | hits=%s"):format(
+                            scanned, name, params, variadic, table.concat(hitList, ",")
+                        ))
+                        for i = 1, math.min(#evidence, 5) do
+                            append("  " .. evidence[i])
                         end
                     end
                 end
+            end
+            append(("Function diperiksa: %d | kandidat keyword: %d"):format(scanned, matched))
+            append("Kandidat hanya petunjuk dari nama/constant/upvalue, bukan bukti fungsi collect.")
+        end
 
-                if not refs.DropsContainer then
-                    local list = raw(obj, "list")
-                    if type(list) == "table" then
-                        for _, item in pairs(list) do
-                            if type(item) == "table" and raw(item, "x") and raw(item, "y") and (raw(item, "uid") or raw(item, "id")) then
-                                refs.DropsContainer = obj
-                                break
-                            end
+        local function scanDroppedObjects()
+            append("=== WORLD DROPPED-OBJECT NAME SCAN ===")
+            local total, matched = 0, 0
+            local ok, descendants = pcall(function() return Workspace:GetDescendants() end)
+            if not ok or type(descendants) ~= "table" then
+                append("GAGAL membaca Workspace: " .. safeString(descendants))
+                return
+            end
+            for _, obj in ipairs(descendants) do
+                total += 1
+                if total > MAX_DESCENDANTS then
+                    append("Batas object Workspace tercapai: " .. MAX_DESCENDANTS)
+                    break
+                end
+                local hits = keywordHits(obj.Name)
+                if #hits > 0 then
+                    matched += 1
+                    local path = "?"
+                    pcall(function() path = obj:GetFullName() end)
+                    local position = "n/a"
+                    pcall(function()
+                        if obj:IsA("BasePart") then
+                            local p = obj.Position
+                            position = ("%.2f, %.2f, %.2f"):format(p.X, p.Y, p.Z)
+                        elseif obj:IsA("Model") and obj.PrimaryPart then
+                            local p = obj.PrimaryPart.Position
+                            position = ("%.2f, %.2f, %.2f"):format(p.X, p.Y, p.Z)
                         end
-                    end
+                    end)
+                    append(("OBJECT %s | %s | pos=%s | %s"):format(
+                        obj.ClassName, obj.Name, position, path
+                    ))
                 end
             end
+            append(("Object bernama relevan: %d | Workspace diperiksa: %d"):format(
+                matched, math.min(total, MAX_DESCENDANTS)
+            ))
+            append("Catatan: dropped item bisa disimpan sebagai data Lua, bukan Instance bernama di Workspace.")
+        end
 
-            -- Cari fungsi yang memiliki kata kunci 'take', 'drop', atau 'collect'
-            if not refs.TakeFn and type(obj) == "function" and debug and debug.info then
-                local okN, name = pcall(debug.info, obj, "n")
-                if okN and name then
-                    local lowerName = string.lower(name)
-                    if string.find(lowerName, "take") or string.find(lowerName, "drop") or string.find(lowerName, "collect") then
-                        print("[AutoCollect Debug] Ditemukan fungsi potensial:", name)
-                        refs.TakeFn = obj
-                    end
+        local function runScan(label, callback)
+            if destroyed or Hub.IsClosing() then return end
+            setStatus("scan " .. label .. "...")
+            append("----------------------------------------")
+            append("MULAI: " .. label)
+            task.spawn(function()
+                local ok, err = pcall(callback)
+                if not ok then append("SCAN ERROR: " .. safeString(err, 300)) end
+                if not destroyed and not Hub.IsClosing() then
+                    append("SELESAI: " .. label)
+                    setStatus("selesai - " .. label)
                 end
-            end
-        end
-    end
-
-    local function playerTile()
-        if not refs.State then return nil, nil end
-        local ok, state = pcall(refs.State)
-        if not ok or type(state) ~= "table" or type(state.x) ~= "number" then
-            return nil, nil
-        end
-        return math.floor(state.x), math.floor(state.y - 0.475)
-    end
-
-    local function getActiveDrops()
-        if refs.DropsContainer and type(raw(refs.DropsContainer, "list")) == "table" then
-            return refs.DropsContainer.list
-        end
-        if rawget(_G, "Drops") and type(_G.Drops.list) == "table" then
-            return _G.Drops.list
-        end
-        if getgenv and getgenv().Drops and type(getgenv().Drops.list) == "table" then
-            return getgenv().Drops.list
-        end
-        if Drops and type(Drops.list) == "table" then
-            return Drops.list
-        end
-        return nil
-    end
-
-    -- Tombol khusus untuk print fungsi yang terdeteksi ke Console (F9)
-    track(scanTakeButton.Activated:Connect(function()
-        discover()
-        if refs.TakeFn and debug and debug.info then
-            local name = debug.info(refs.TakeFn, "n")
-            report("Fungsi Take ditemukan: " .. tostring(name))
-        else
-            report("Fungsi Take tidak ditemukan secara otomatis.")
-        end
-    end))
-
-    --==================================================
-    -- [F] BUTTON EVENTS & LOOP UTAMA
-    --==================================================
-
-    track(stopButton.Activated:Connect(function()
-        running = false
-        report("STOP diminta.")
-    end))
-
-    track(startButton.Activated:Connect(function()
-        if running then return end
-
-        discover()
-
-        local delayMs = tonumber(collectDelayBox.Text)
-        if not delayMs or delayMs < 0 then
-            report("Error: Jeda collect harus berupa angka valid.")
-            return
-        end
-
-        closePopup()
-        running = true
-        report("Auto Collect aktif (Remote Mode)...")
-
-        task.spawn(function()
-            while running and not destroyed and not Hub.IsClosing() do
-                if not refs.State then discover() end
-
-                local px, py = playerTile()
-                if not px or not py then
-                    report("Error: Posisi player tidak terbaca.")
-                    task.wait(0.5)
-                    continue
-                end
-
-                pcall(function()
-                    local dropsList = getActiveDrops()
-                    if type(dropsList) == "table" then
-                        for _, drop in ipairs(dropsList) do
-                            if drop and drop.x and drop.y then
-                                local uid = drop.uid or drop.id
-                                if uid then
-                                    local dx = drop.x - px
-                                    local dy = drop.y - py
-
-                                    if dx >= -2 and dx <= 2 and dy >= -2 and dy <= 2 then
-                                        local key = dx .. "," derivable or (dx .. "," .. dy)
-                                        if enabledTiles[dx .. "," .. dy] ~= false then
-                                            task.spawn(function()
-                                                -- Coba berbagai kemungkinan cara eksekusi pengambilan item di game ini
-                                                if refs.TakeFn then
-                                                    pcall(refs.TakeFn, uid, drop.amount or 1)
-                                                end
-                                                if worldTake then
-                                                    pcall(worldTake, uid, drop.amount or 1)
-                                                end
-                                                if TakeDropRemote then
-                                                    pcall(function() TakeDropRemote:InvokeServer(uid, drop.amount or 1) end)
-                                                end
-                                                -- Fallback eksekusi melalui event umum jika ada
-                                                if game:GetService("ReplicatedStorage") then
-                                                    local remote = game.ReplicatedStorage:FindFirstChild("TakeDrop") or game.ReplicatedStorage:FindFirstChild("DropTake")
-                                                    if remote and remote:IsA("RemoteEvent") then
-                                                        remote:FireServer(uid)
-                                                    elseif remote and remote:IsA("RemoteFunction") then
-                                                        remote:InvokeServer(uid)
-                                                    end
-                                                end
-                                            end)
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end)
-
-                task.wait(delayMs / 1000)
-            end
-
-            running = false
-            if not destroyed then report("Auto Collect berhenti.") end
-        end)
-    end))
-
-    --==================================================
-    -- [G] CLEANUP
-    --==================================================
-
-    local function cleanup()
-        if destroyed then return end
-        destroyed = true
-        running = false
-        closePopup()
-
-        for _, connection in ipairs(connections) do
-            pcall(function()
-                connection:Disconnect()
             end)
         end
-        table.clear(connections)
-    end
 
-    Hub.RegisterCleanup(cleanup)
-    updateTileButton()
+        local scanAll = makeButton("SCAN ALL (CAPABILITIES + REMOTES + FUNCTIONS + WORLD)", Theme.Green)
+        local scanRemoteButton = makeButton("SCAN REMOTE EVENT / FUNCTION", Theme.Accent)
+        local scanFunctionButton = makeButton("SCAN GC FUNCTIONS + CONSTANTS", Theme.Accent)
+        local scanWorldButton = makeButton("SCAN WORLD DROPPED-OBJECT NAMES", Theme.Accent)
+        local copyButton = makeButton("COPY FEEDBACK", Theme.PanelDark)
+        copyButton.TextColor3 = Theme.Text
+        local clearButton = makeButton("CLEAR FEEDBACK", Theme.PanelDark)
+        clearButton.TextColor3 = Theme.Text
 
-    print("[AutoCollect] Module loaded successfully.")
+        scanAll.Activated:Connect(function()
+            runScan("ALL", function()
+                scanCapabilities()
+                scanRemotes()
+                scanFunctions()
+                scanDroppedObjects()
+            end)
+        end)
+        scanRemoteButton.Activated:Connect(function()
+            runScan("REMOTES", scanRemotes)
+        end)
+        scanFunctionButton.Activated:Connect(function()
+            runScan("FUNCTIONS", scanFunctions)
+        end)
+        scanWorldButton.Activated:Connect(function()
+            runScan("WORLD OBJECTS", scanDroppedObjects)
+        end)
+        clearButton.Activated:Connect(clearLog)
+        copyButton.Activated:Connect(function()
+            local content = table.concat(lines, "\n")
+            local copied = false
+            if type(setclipboard) == "function" then
+                copied = pcall(setclipboard, content)
+            elseif type(toclipboard) == "function" then
+                copied = pcall(toclipboard, content)
+            end
+            if copied then
+                setStatus("feedback berhasil disalin")
+                append("Feedback disalin ke clipboard.")
+            else
+                setStatus("clipboard API tidak tersedia - salin manual dari kotak output")
+                append("Clipboard API tidak tersedia. Tekan lama kotak output untuk menyalin manual jika executor mendukung.")
+            end
+        end)
 
+        append("Module AutoCollect Scanner aktif.")
+        append("Mode READ-ONLY: tidak memanggil fungsi game dan tidak mengirim remote.")
+        append("Player: " .. (LocalPlayer and LocalPlayer.Name or "tidak diketahui"))
+        append("Tekan SCAN ALL, lalu COPY FEEDBACK dan kirim hasilnya ke chat.")
+
+        local function cleanup()
+            if destroyed then return end
+            destroyed = true
+        end
+        Hub.RegisterCleanup(cleanup)
+        print("[AutoCollect Scanner] Module loaded.")
     end)
-
 end
+
+--==================================================
+-- END MODULE: AUTO COLLECT SCANNER
+--==================================================
