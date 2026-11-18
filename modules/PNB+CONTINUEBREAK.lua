@@ -879,8 +879,8 @@ return function(Hub)
                     if #found == 0 then
                         -- Validasi tile kosong selama 0.4 detik.
                         local stable = true
-                        for _ = 1, 2 do
-                            task.wait(0.2)
+                        for _ = 1, 1 do
+                            task.wait(0.1)
                             if #dropsAtTarget(target) > 0 then
                                 stable = false
                                 break
