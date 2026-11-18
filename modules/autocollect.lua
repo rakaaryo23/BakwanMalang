@@ -1,228 +1,744 @@
---==================================================
--- MODULE: AUTOCOLLECT FUNCTION TRACER (READ-ONLY)
--- Snapshots GC function metadata/upvalues before and after
--- one Dirt Seed pickup. Does NOT hook, call, or fire game functions.
---==================================================
+-- AutoCollect_Remote.lua
+-- Modul mandiri untuk Hub.RegisterTab.
+-- Mekanisme pengambilan drop/remote dan pembaruan drop diadaptasi dari k(5).lua.
+-- Discovery Inventory/World/State dan rumus posisi player diadaptasi dari APB(2).lua.
+
 return function(Hub)
-    Hub.RegisterTab("AutoCollect Function Tracer", function(page)
+    assert(Hub and type(Hub.RegisterTab) == "function", "Hub.RegisterTab tidak ditemukan")
+
+    Hub.RegisterTab("Auto Collect", function(page, Hub)
+        local Players = game:GetService("Players")
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local LocalPlayer = Players.LocalPlayer
+
+        local destroyed, running = false, false
+        local connections = {}
+        local refs = { Inv = nil, World = nil, State = nil }
+        local Drops = { list = nil, update = nil, nextScan = 0 }
+        local DropFailUntil = {}
+
+        -- TEST DIAGNOSTICS: logging only; does not send extra take requests.
+        local testMode = "SERIAL" -- SERIAL or PARALLEL
+        local testLog = {}
+        local function logTest(message)
+            local line = ("[AC TEST +%.3fs] %s"):format(os.clock(), tostring(message))
+            testLog[#testLog + 1] = line
+            if #testLog > 500 then table.remove(testLog, 1) end
+            print(line)
+        end
+
+        local function inventoryCount(itemId)
+            if not refs.Inv then return nil end
+            local slots = raw(refs.Inv, "slots")
+            if type(slots) ~= "table" then return nil end
+            local total = 0
+            for _, slot in pairs(slots) do
+                if type(slot) == "table" and tonumber(raw(slot, "id")) == itemId then
+                    total += tonumber(raw(slot, "n")) or 0
+                end
+            end
+            return total
+        end
+
+        local function copyTestLog()
+            local content = table.concat(testLog, "\n")
+            if type(setclipboard) == "function" then
+                local ok = pcall(setclipboard, content)
+                if ok then
+                    logTest("TEST LOG copied with setclipboard")
+                    return
+                end
+            end
+            if type(toclipboard) == "function" then
+                local ok = pcall(toclipboard, content)
+                if ok then
+                    logTest("TEST LOG copied with setclipboard")
+                    return
+                end
+            end
+            logTest("Clipboard tidak tersedia; salin log dari console")
+        end
+        local enabled = {}
+        local popup
+
         local Theme = {
-            Panel = Color3.fromRGB(239,194,207), Accent = Color3.fromRGB(171,91,119),
-            Text = Color3.fromRGB(76,43,57), Muted = Color3.fromRGB(139,96,111),
-            White = Color3.fromRGB(255,249,251), Green = Color3.fromRGB(55,140,90),
-            Red = Color3.fromRGB(180,65,75)
+            Background = Color3.fromRGB(22, 24, 30),
+            Panel = Color3.fromRGB(32, 35, 43),
+            PanelDark = Color3.fromRGB(52, 56, 66),
+            Text = Color3.fromRGB(240, 242, 248),
+            Muted = Color3.fromRGB(165, 171, 184),
+            Green = Color3.fromRGB(35, 145, 92),
+            Red = Color3.fromRGB(170, 55, 60),
+            White = Color3.fromRGB(255, 255, 255),
         }
-        local destroyed, recording = false, false
-        local lines, connections = {}, {}
-        local output, status, startButton, stopButton
-        local before, stateRef, inventoryRef, lastCount
-        local startedAt, lastSample = 0, 0
-        local initialCount
-        local ITEM_ID, MAX_FUNCTIONS, SAMPLE_INTERVAL = 3, 12000, 0.20
-        local keywords = {"collect","pickup","pick_up","take","grab","item","drop","loot","interact","touch","claim","receive","inventory","seed","gem"}
+
+        local function track(c)
+            connections[#connections + 1] = c
+            return c
+        end
 
         local function create(class, props, parent)
-            local o = Instance.new(class)
-            for k,v in pairs(props or {}) do o[k] = v end
-            o.Parent = parent
-            return o
-        end
-        local function corner(o, r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 7); c.Parent=o end
-        local function safe(v)
-            local ok,s=pcall(tostring,v); if not ok then return "?" end
-            return s:gsub("\n"," "):gsub("\r"," "):sub(1,150)
-        end
-        local function log(msg)
-            local prefix = recording and ("+%.2fs"):format(os.clock()-startedAt) or os.date("%H:%M:%S")
-            lines[#lines+1] = prefix .. " | " .. safe(msg)
-            while #lines > 1800 do table.remove(lines,1) end
-            if output and output.Parent then output.Text=table.concat(lines,"\n"); output.CursorPosition=-1 end
-            print("[AC-FTRACE] " .. lines[#lines])
-        end
-        local function statusText(s, color) status.Text="Status: "..s; status.TextColor3=color or Theme.Text end
-        local function raw(t,k) if type(t)~="table" then return nil end; local ok,v=pcall(rawget,t,k); return ok and v or nil end
-        local function getUpvalues(fn)
-            local getter = (debug and debug.getupvalues) or getupvalues
-            if type(getter)~="function" then return nil end
-            local ok, vals=pcall(getter,fn); if ok and type(vals)=="table" then return vals end
-            return nil
-        end
-        local function getConstants(fn)
-            local getter=(debug and debug.getconstants) or getconstants
-            if type(getter)~="function" then return nil end
-            local ok,vals=pcall(getter,fn); if ok and type(vals)=="table" then return vals end
-            return nil
-        end
-        local function valueSig(v)
-            local t=type(v)
-            if t=="nil" or t=="number" or t=="string" or t=="boolean" then return t..":"..safe(v) end
-            if t=="table" then
-                local n=0; local sample={}
-                for k,x in pairs(v) do
-                    n+=1
-                    if #sample<5 then sample[#sample+1]=safe(k).."="..(type(x)=="table" and "<table>" or safe(x)) end
-                    if n>=5000 then break end
-                end
-                table.sort(sample)
-                return "table#"..n.."{"..table.concat(sample,";").."}"
-            end
-            return t..":"..safe(v)
-        end
-        local function containsKeyword(s)
-            s=string.lower(safe(s))
-            for _,kw in ipairs(keywords) do if string.find(s,kw,1,true) then return true end end
-            return false
-        end
-        local function discoverStateAndInventory()
-            stateRef, inventoryRef=nil,nil
-            if type(getgc)~="function" then return end
-            local ok,objs=pcall(getgc,true); if not ok or type(objs)~="table" then return end
-            local bestScore=-1
-            for _,obj in ipairs(objs) do
-                if type(obj)=="table" then
-                    local sf=raw(obj,"state")
-                    if not stateRef and type(sf)=="function" then
-                        local good,st=pcall(sf)
-                        if good and type(st)=="table" and type(st.x)=="number" and type(st.y)=="number" and st.facing~=nil and st.vx~=nil then stateRef=sf end
-                    end
-                    local slots,cap=raw(obj,"slots"),raw(obj,"capacity")
-                    if type(slots)=="table" and type(cap)=="number" and cap>=0 and cap<=10000 then
-                        local score=0
-                        for _,slot in pairs(slots) do if type(slot)=="table" and tonumber(raw(slot,"id")) then score+=2 end end
-                        if score>bestScore then bestScore=score; inventoryRef=obj end
-                    end
-                end
-            end
-        end
-        local function count3()
-            if not inventoryRef then return nil end
-            local slots=raw(inventoryRef,"slots"); if type(slots)~="table" then return nil end
-            local n=0
-            for _,slot in pairs(slots) do if type(slot)=="table" and tonumber(raw(slot,"id"))==ITEM_ID then n+=tonumber(raw(slot,"n")) or 0 end end
-            return n
-        end
-        local function snapshotFunctions()
-            local snap, total={},0
-            if type(getgc)~="function" then return snap,0,"getgc tidak tersedia" end
-            local ok,objs=pcall(getgc,true); if not ok or type(objs)~="table" then return snap,0,"getgc(true) gagal" end
-            local info=(debug and debug.info) or (debug and debug.getinfo)
-            if type(info)~="function" then return snap,0,"debug.info/getinfo tidak tersedia" end
-            for _,fn in ipairs(objs) do
-                if type(fn)=="function" and total<MAX_FUNCTIONS then
-                    total+=1
-                    local okN,name=pcall(info,fn,"n"); if not okN then name="?" end
-                    local okA,args,vararg=pcall(info,fn,"a"); if not okA then args="?"; vararg="?" end
-                    local consts=getConstants(fn) or {}
-                    local ups=getUpvalues(fn) or {}
-                    local cparts, uparts={},{}
-                    local hit=false
-                    for _,v in pairs(consts) do
-                        local sv=safe(v); cparts[#cparts+1]=sv
-                        if containsKeyword(sv) then hit=true end
-                    end
-                    for k,v in pairs(ups) do
-                        uparts[safe(k)]=valueSig(v)
-                        if containsKeyword(k) or containsKeyword(v) then hit=true end
-                    end
-                    local fname=safe(name)
-                    if containsKeyword(fname) then hit=true end
-                    table.sort(cparts)
-                    local key=tostring(fn)
-                    snap[key]={fn=fn,name=fname,args=safe(args),vararg=safe(vararg),constants=table.concat(cparts,"|"),upvalues=uparts,keyword=hit}
-                end
-            end
-            return snap,total,nil
-        end
-        local function reportSnapshotDiff()
-            local after,total,err=snapshotFunctions()
-            if err then log("POST-SCAN ERROR: "..err); return end
-            local changed, candidates, added=0,0,0
-            for key,a in pairs(after) do
-                local b=before and before[key]
-                if not b then
-                    added+=1
-                    if a.keyword then log(("NEW FUNCTION CANDIDATE name=%s args=%s const={%s}"):format(a.name,a.args,a.constants:sub(1,260))); candidates+=1 end
-                else
-                    local diffs={}
-                    if a.keyword then candidates+=1 end
-                    for uk,av in pairs(a.upvalues) do
-                        local bv=b.upvalues[uk]
-                        if bv~=av then diffs[#diffs+1]=uk..": "..safe(bv or "<absent>").." -> "..safe(av) end
-                    end
-                    for uk,bv in pairs(b.upvalues) do if a.upvalues[uk]==nil then diffs[#diffs+1]=uk..": "..safe(bv).." -> <absent>" end end
-                    if #diffs>0 then
-                        changed+=1
-                        log(("UPVALUE CHANGED | %s | args=%s | %s"):format(a.name,a.args,table.concat(diffs," ; "):sub(1,650)))
-                    end
-                end
-            end
-            log(("POST-SCAN SUMMARY | functions=%d | changed-upvalue-functions=%d | new-functions=%d | keyword-candidates=%d"):format(total,changed,added,candidates))
-            log("CATATAN: perubahan upvalue/kandidat bukan bukti fungsi dipanggil; ini petunjuk observasional, bukan call trace.")
-        end
-        local function start()
-            if recording then return end
-            lines={}; output.Text=""; startedAt=os.clock(); lastSample=0
-            discoverStateAndInventory()
-            local n, count, err=snapshotFunctions()
-            before=n
-            log("BASELINE: function snapshot="..count..(err and (" | "..err) or ""))
-            log("debug.getconstants="..tostring(type((debug and debug.getconstants) or getconstants)=="function").." | debug.getupvalues="..tostring(type((debug and debug.getupvalues) or getupvalues)=="function"))
-            log("state()="..tostring(stateRef~=nil).." | inventory="..tostring(inventoryRef~=nil))
-            lastCount=count3(); initialCount=lastCount; log("INVENTORY ID 3 BEFORE="..tostring(initialCount))
-            recording=true; statusText("RECORDING - ambil SATU Dirt Seed ID 3",Theme.Green)
-            log("=== ACTION WINDOW OPEN ===")
-            log("Sekarang lakukan satu kali take item. Setelah inventory bertambah, tekan STOP + ANALYZE.")
-            startButton.Text="RECORDING..."
-        end
-        local function stop()
-            if not recording then return end
-            recording=false; statusText("ANALYZING",Theme.Red); stopButton.Text="ANALYZING..."
-            log("=== ACTION WINDOW CLOSED ===")
-            local now=count3(); log("INVENTORY ID 3 AFTER="..tostring(now).." | delta="..tostring(now and initialCount and (now-initialCount) or "unknown"))
-            reportSnapshotDiff()
-            statusText("STOPPED - hasil analisis tersedia",Theme.Green)
-            startButton.Text="START NEW TEST"; stopButton.Text="STOP + ANALYZE"
+            local obj = Instance.new(class)
+            for k, v in pairs(props) do obj[k] = v end
+            obj.Parent = parent
+            return obj
         end
 
-        create("UIListLayout",{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder},page)
-        create("TextLabel",{Size=UDim2.new(1,0,0,58),BackgroundTransparency=1,Text="FUNCTION TRACER | Snapshot fungsi GC + constants + upvalues sebelum/sesudah take Dirt Seed ID 3. Tidak memasang hook, tidak memanggil fungsi game, tidak mengirim remote.",TextColor3=Theme.Text,Font=Enum.Font.Gotham,TextSize=10,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left},page)
-        status=create("TextLabel",{Size=UDim2.new(1,0,0,27),BackgroundColor3=Theme.Panel,BorderSizePixel=0,Text="Status: siap",TextColor3=Theme.Text,Font=Enum.Font.GothamBold,TextSize=10,TextXAlignment=Enum.TextXAlignment.Left},page); corner(status,6)
-        startButton=create("TextButton",{Size=UDim2.new(1,0,0,36),BackgroundColor3=Theme.Green,BorderSizePixel=0,Text="START RECORDING",TextColor3=Theme.White,Font=Enum.Font.GothamBold,TextSize=11},page); corner(startButton,7)
-        stopButton=create("TextButton",{Size=UDim2.new(1,0,0,36),BackgroundColor3=Theme.Red,BorderSizePixel=0,Text="STOP + ANALYZE",TextColor3=Theme.White,Font=Enum.Font.GothamBold,TextSize=11},page); corner(stopButton,7)
-        local copyButton=create("TextButton",{Size=UDim2.new(1,0,0,36),BackgroundColor3=Theme.Accent,BorderSizePixel=0,Text="COPY FEEDBACK",TextColor3=Theme.White,Font=Enum.Font.GothamBold,TextSize=11},page); corner(copyButton,7)
-        local clearButton=create("TextButton",{Size=UDim2.new(1,0,0,32),BackgroundColor3=Theme.Panel,BorderSizePixel=0,Text="CLEAR FEEDBACK",TextColor3=Theme.Text,Font=Enum.Font.GothamBold,TextSize=10},page); corner(clearButton,7)
-        output=create("TextBox",{Size=UDim2.new(1,0,0,340),BackgroundColor3=Color3.fromRGB(255,245,248),BorderSizePixel=0,Text="Tekan START, ambil 1 Dirt Seed ID 3, lalu STOP + ANALYZE dan COPY FEEDBACK.",TextColor3=Theme.Text,PlaceholderColor3=Theme.Muted,Font=Enum.Font.Code,TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=false,MultiLine=true,ClearTextOnFocus=false,TextEditable=false},page); corner(output,7)
-        connections[#connections+1]=startButton.Activated:Connect(start)
-        connections[#connections+1]=stopButton.Activated:Connect(stop)
-        connections[#connections+1]=copyButton.Activated:Connect(function()
-            local copier=setclipboard or toclipboard
-            if type(copier)=="function" then local ok,err=pcall(copier,table.concat(lines,"\n")); statusText(ok and "feedback copied" or ("copy gagal: "..safe(err)),ok and Theme.Green or Theme.Red) else statusText("clipboard tidak tersedia",Theme.Red) end
-        end)
-        connections[#connections+1]=clearButton.Activated:Connect(function() if recording then recording=false end; lines={}; output.Text=""; statusText("feedback cleared") end)
-        task.spawn(function()
-            while not destroyed and not Hub.IsClosing() do
-                if recording and os.clock()-lastSample>=SAMPLE_INTERVAL then
-                    lastSample=os.clock()
-                    local current=count3()
-                    if current~=nil and lastCount~=nil and current~=lastCount then
-                        log(("INVENTORY CHANGE ID 3 | %d -> %d | delta=%+d"):format(lastCount,current,current-lastCount))
+        local function corner(obj, radius)
+            local c = Instance.new("UICorner")
+            c.CornerRadius = UDim.new(0, radius or 6)
+            c.Parent = obj
+            return c
+        end
+
+        local function raw(t, k)
+            if type(t) ~= "table" then return nil end
+            local ok, value = pcall(rawget, t, k)
+            return ok and value or nil
+        end
+
+        -- APB(2).lua: identifikasi tabel inventory dengan struktur slots/capacity.
+        local function inventoryCandidate(t)
+            if type(t) ~= "table" then return nil end
+            local slots, cap = raw(t, "slots"), raw(t, "capacity")
+            if type(slots) ~= "table" or type(cap) ~= "number"
+                or cap < 0 or cap > 10000 then return nil end
+
+            local valid, populated = 0, 0
+            for k, slot in pairs(slots) do
+                if type(k) == "number" and k > 0 and k % 1 == 0
+                    and type(slot) == "table" then
+                    local id, n = raw(slot, "id"), raw(slot, "n")
+                    if id ~= nil or n ~= nil then valid += 1 end
+                    if id ~= nil then populated += 1 end
+                end
+            end
+            if valid == 0 and next(slots) ~= nil then return nil end
+            return { ref = t, score = valid * 100 + populated + math.min(cap, 100) }
+        end
+
+        local function discover()
+            local getconsts = (debug and debug.getconstants) or getconstants
+            if type(getgc) ~= "function" or type(getconsts) ~= "function"
+                or not (debug and debug.info) then
+                return false, "Executor tidak menyediakan getgc/getconstants/debug.info"
+            end
+
+            local ok, objects = pcall(getgc, true)
+            if not ok or type(objects) ~= "table" then
+                return false, "getgc(true) gagal: " .. tostring(objects)
+            end
+
+            refs.Inv, refs.World, refs.State = nil, nil, nil
+            local bestInv
+
+            for _, obj in ipairs(objects) do
+                if type(obj) == "table" then
+                    local candidate = inventoryCandidate(obj)
+                    if candidate and (not bestInv or candidate.score > bestInv.score) then
+                        bestInv = candidate
                     end
-                    lastCount=current
-                    if stateRef then
-                        local ok,s=pcall(stateRef)
-                        if ok and type(s)=="table" and type(s.x)=="number" and type(s.y)=="number" then
-                            log(("PLAYER SAMPLE X=%.4f Y=%.4f VEL=%s,%s facing=%s"):format(s.x,s.y,safe(s.vx),safe(s.vy),safe(s.facing)))
+
+                    if not refs.World
+                        and type(raw(obj, "fg")) == "table"
+                        and type(raw(obj, "bg")) == "table"
+                        and type(raw(obj, "w")) == "number"
+                        and type(raw(obj, "h")) == "number"
+                        and raw(obj, "spawn") ~= nil then
+                        refs.World = obj
+                    end
+
+                    if not refs.State then
+                        local stateFn = raw(obj, "state")
+                        if type(stateFn) == "function" then
+                            local good, state = pcall(stateFn)
+                            if good and type(state) == "table"
+                                and type(state.x) == "number"
+                                and type(state.y) == "number"
+                                and state.facing ~= nil and state.vx ~= nil then
+                                refs.State = stateFn
+                            end
                         end
                     end
                 end
-                task.wait(0.05)
+            end
+
+            refs.Inv = bestInv and bestInv.ref or nil
+            local missing = {}
+            for _, key in ipairs({"Inv", "World", "State"}) do
+                if not refs[key] then table.insert(missing, key) end
+            end
+            if #missing > 0 then
+                return false, "Referensi belum lengkap: " .. table.concat(missing, ", ")
+            end
+            return true, "Scan berhasil: Inventory, World, dan State ditemukan."
+        end
+
+        -- Rumus playerTile sama dengan APB(2).lua.
+        local function playerTile()
+            if not refs.State then return nil end
+            local ok, state = pcall(refs.State)
+            if not ok or type(state) ~= "table"
+                or type(state.x) ~= "number" or type(state.y) ~= "number"
+                or state.active == false then return nil end
+            return math.floor(state.x), math.floor(state.y - 0.475)
+        end
+
+        local function getUpvalues(fn)
+            if debug and debug.getupvalues then
+                local ok, ups = pcall(debug.getupvalues, fn)
+                if ok and type(ups) == "table" then return ups end
+            end
+            local out = {}
+            local gu = (debug and debug.getupvalue) or getupvalue
+            if gu then
+                for i = 1, 60 do
+                    local ok, v = pcall(gu, fn, i)
+                    if not ok then break end
+                    out[i] = v
+                end
+            end
+            return out
+        end
+
+        local function isDropList(t)
+            if type(t) ~= "table" or t == refs.World then return false end
+            local first = rawget(t, 1)
+            if first == nil then return next(t) == nil end
+            return type(first) == "table"
+                and rawget(first, "uid") ~= nil
+                and rawget(first, "frame") ~= nil
+        end
+
+        function Drops.findUpdate()
+            local w, list = refs.World, Drops.list
+            local wd = w and rawget(w, "dropTaken")
+            if type(wd) ~= "function" or not list then return false end
+            for _, u in pairs(getUpvalues(wd)) do
+                if type(u) == "function" then
+                    for _, uu in pairs(getUpvalues(u)) do
+                        if rawequal(uu, list) then
+                            Drops.update = u
+                            return true
+                        end
+                    end
+                end
+            end
+            return false
+        end
+
+        local function findDropRefs()
+            local w = refs.World
+            local dl = w and rawget(w, "dropList")
+            if type(dl) == "function" then
+                local good, list = pcall(dl)
+                if good and isDropList(list) then
+                    if Drops.list ~= list then Drops.update = nil end
+                    Drops.list = list
+                    if not Drops.update then Drops.findUpdate() end
+                    return true
+                end
+            end
+
+            if Drops.list then return true end
+            Drops.list, Drops.update = nil, nil
+
+            local wd = refs.World and rawget(refs.World, "dropTaken")
+            if type(wd) == "function" then
+                for _, u in pairs(getUpvalues(wd)) do
+                    if not Drops.list and isDropList(u) then
+                        Drops.list = u
+                    elseif not Drops.update and type(u) == "function" then
+                        Drops.update = u
+                    end
+                end
+            end
+
+            local remotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
+            local ev = remotes and remotes:FindFirstChild("DropTaken")
+            if not Drops.list and ev and getconnections then
+                local good, conns = pcall(getconnections, ev.OnClientEvent)
+                if good and type(conns) == "table" then
+                    for _, c in ipairs(conns) do
+                        local okf, fn = pcall(function() return c.Function end)
+                        if okf and type(fn) == "function" then
+                            for _, u in pairs(getUpvalues(fn)) do
+                                if not Drops.list and isDropList(u) then
+                                    Drops.list = u
+                                elseif not Drops.update and type(u) == "function" then
+                                    Drops.update = u
+                                end
+                            end
+                        end
+                        if Drops.list then break end
+                    end
+                end
+            end
+            return Drops.list ~= nil
+        end
+
+        -- Drops.applyTaken disalin dari k(5).lua.
+        function Drops.applyTaken(d, left)
+            local list = Drops.list
+            if not list or not table.find(list, d) then return end
+            if not Drops.update then Drops.findUpdate() end
+            if Drops.update then
+                local ok = pcall(Drops.update, d, left)
+                if ok then
+                    if left > 0 then
+                        d.flown = nil
+                        if typeof(d.frame) == "Instance" then
+                            pcall(function() d.frame.Visible = not d.culled end)
+                        end
+                    end
+                    return
+                end
+            end
+            d.n = left
+            if left > 0 then
+                pcall(function()
+                    if d.setGem then
+                        d.setGem(left)
+                    elseif d.count then
+                        d.count:set(left > 1 and tostring(left) or "")
+                    end
+                end)
+                d.flown = nil
+                if typeof(d.frame) == "Instance" then
+                    pcall(function() d.frame.Visible = not d.culled end)
+                end
+            else
+                local idx = table.find(list, d)
+                if idx then table.remove(list, idx) end
+                if typeof(d.frame) == "Instance" then
+                    pcall(function() d.frame:Destroy() end)
+                end
+            end
+        end
+
+        -- Fungsi takeDrop mengikuti k(5).lua; counter/UI statistik utama tidak
+        -- disertakan karena modul ini berdiri sendiri dan tidak berbagi State/Stats utama.
+        local function takeDrop(d)
+            local worldTake = refs.World and rawget(refs.World, "takeDrop")
+            if type(worldTake) ~= "function" then
+                logTest("SKIP: World.takeDrop tidak ditemukan")
+                return false
+            end
+            if d.taking or d.pending or d.display or (d.n or 0) <= 0 then return false end
+            if d.armed == false and d.id ~= 112 then return false end
+
+            local now = os.clock()
+            if DropFailUntil[d.uid] and now < DropFailUntil[d.uid] then return false end
+
+            local amount = d.n
+            if d.id ~= 112 and refs.Inv then
+                local okr, room = pcall(function() return refs.Inv:room(d.id) end)
+                if okr and type(room) == "number" then amount = math.min(amount, room) end
+            end
+            if amount <= 0 then
+                logTest(("SKIP uid=%s id=%s: inventory room/amount=0"):format(
+                    tostring(d.uid), tostring(d.id)
+                ))
+                DropFailUntil[d.uid] = now + 1
+                return false
+            end
+
+            local beforeInv = inventoryCount(d.id)
+            logTest(("TAKE START mode=%s uid=%s id=%s dropN=%s request=%s pos=(%s,%s) invBefore=%s"):format(
+                testMode, tostring(d.uid), tostring(d.id), tostring(d.n),
+                tostring(amount), tostring(d.x), tostring(d.y), tostring(beforeInv)
+            ))
+
+            d.taking = true
+            if typeof(d.frame) == "Instance" then
+                pcall(function() d.frame.Visible = false end)
+            end
+
+            local callStart = os.clock()
+            local ok, taken = pcall(worldTake, d.uid, amount)
+            local callElapsed = os.clock() - callStart
+            d.taking = false
+
+            logTest(("TAKE RETURN uid=%s pcallOK=%s returnType=%s return=%s elapsed=%.3fs"):format(
+                tostring(d.uid), tostring(ok), type(taken), tostring(taken), callElapsed
+            ))
+
+            if not (ok and type(taken) == "number" and taken > 0) then
+                d.refused = os.clock()
+                d.failN = (d.failN or 0) + 1
+                DropFailUntil[d.uid] = os.clock() + math.min(8, d.failN)
+                d.flown = nil
+                if typeof(d.frame) == "Instance" then
+                    pcall(function() d.frame.Visible = not d.culled end)
+                end
+                logTest(("TAKE REJECTED uid=%s | visual restored | failN=%s"):format(
+                    tostring(d.uid), tostring(d.failN)
+                ))
+                return false
+            end
+
+            DropFailUntil[d.uid] = nil
+            local addOK, addErr = true, nil
+            if d.id ~= 112 and refs.Inv then
+                addOK, addErr = pcall(function() refs.Inv:add(d.id, taken) end)
+            end
+            local afterLocalAdd = inventoryCount(d.id)
+            logTest(("LOCAL INVENTORY ADD uid=%s addOK=%s err=%s taken=%s before=%s after=%s delta=%s"):format(
+                tostring(d.uid), tostring(addOK), tostring(addErr), tostring(taken),
+                tostring(beforeInv), tostring(afterLocalAdd),
+                tostring((beforeInv and afterLocalAdd) and (afterLocalAdd - beforeInv) or "unknown")
+            ))
+
+            local left = math.max(0, (d.n or 0) - taken)
+            Drops.applyTaken(d, left)
+            logTest(("LOCAL DROP UPDATE uid=%s taken=%s left=%s stillInList=%s frameVisible=%s"):format(
+                tostring(d.uid), tostring(taken), tostring(left),
+                tostring(Drops.list and table.find(Drops.list, d) ~= nil),
+                tostring(typeof(d.frame) == "Instance" and d.frame.Visible or "no-frame")
+            ))
+
+            -- Observe possible later server/client reconciliation; no extra take call.
+            task.delay(0.35, function()
+                if destroyed then return end
+                local later = inventoryCount(d.id)
+                logTest(("FOLLOWUP 0.35s uid=%s inv=%s deltaFromBefore=%s"):format(
+                    tostring(d.uid), tostring(later),
+                    tostring((beforeInv and later) and (later - beforeInv) or "unknown")
+                ))
+            end)
+            task.delay(1.25, function()
+                if destroyed then return end
+                local later = inventoryCount(d.id)
+                logTest(("FOLLOWUP 1.25s uid=%s inv=%s deltaFromBefore=%s"):format(
+                    tostring(d.uid), tostring(later),
+                    tostring((beforeInv and later) and (later - beforeInv) or "unknown")
+                ))
+            end)
+            return true
+        end
+
+        -- Batas tile persis dari inTile() k(5).lua.
+        local function inTile(t, x, y)
+            return x >= t.x - 0.15 and x < t.x + 1.15
+                and y >= t.y - 0.15 and y < t.y + 1.15
+        end
+
+        local function canTry(d, now)
+            if type(d) ~= "table" or d.taking or (d.n or 0) <= 0
+                or type(d.x) ~= "number" then return false end
+            if d.armed == false and d.id ~= 112 then return false end
+            local fail = DropFailUntil[d.uid]
+            return not (fail and now < fail)
+        end
+
+        local function remoteTick()
+            local list = Drops.list
+            if type(list) ~= "table" then return end
+            local px, py = playerTile()
+            if not px then return end
+            local now = os.clock()
+
+            for i = #list, 1, -1 do
+                local d = list[i]
+                if d.id == 3 and canTry(d, now) then -- TEST FILTER: Dirt Seed only
+                    local hit = false
+                    for dy = -2, 2 do
+                        for dx = -2, 2 do
+                            local key = dx .. "," .. dy
+                            if enabled[key] == true
+                                and inTile({x = px + dx, y = py + dy}, d.x, d.y) then
+                                hit = true
+                                break
+                            end
+                        end
+                        if hit then break end
+                    end
+                    if hit then
+                        if testMode == "SERIAL" then
+                            -- One take call completes before the next drop is attempted.
+                            takeDrop(d)
+                        else
+                            -- Original behavior: each matching drop gets its own task.
+                            task.spawn(takeDrop, d)
+                        end
+                    end
+                end
+            end
+        end
+
+        -- UI dasar.
+        local root = page
+        local title = create("TextLabel", {
+            Name = "AutoCollectTitle",
+            Size = UDim2.new(1, -12, 0, 28),
+            BackgroundTransparency = 1,
+            Text = "AUTO COLLECT | REMOTE",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, root)
+
+        local status = create("TextLabel", {
+            Name = "AutoCollectStatus",
+            Position = UDim2.fromOffset(0, 30),
+            Size = UDim2.new(1, -12, 0, 34),
+            BackgroundTransparency = 1,
+            Text = "Status: menunggu scan",
+            TextColor3 = Theme.Muted,
+            Font = Enum.Font.Gotham,
+            TextSize = 11,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, root)
+
+        local tileButton = create("TextButton", {
+            Position = UDim2.fromOffset(0, 70),
+            Size = UDim2.fromOffset(190, 34),
+            BackgroundColor3 = Theme.PanelDark,
+            BorderSizePixel = 0,
+            Text = "PILIH TILE (0 AKTIF)",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+        }, root)
+        corner(tileButton, 7)
+
+        local toggle = create("TextButton", {
+            Position = UDim2.fromOffset(198, 70),
+            Size = UDim2.fromOffset(100, 34),
+            BackgroundColor3 = Theme.Green,
+            BorderSizePixel = 0,
+            Text = "START",
+            TextColor3 = Theme.White,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+        }, root)
+        corner(toggle, 7)
+
+        local modeButton = create("TextButton", {
+            Position = UDim2.fromOffset(0, 112),
+            Size = UDim2.fromOffset(142, 30),
+            BackgroundColor3 = Theme.PanelDark,
+            BorderSizePixel = 0,
+            Text = "TEST MODE: SERIAL",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 10,
+        }, root)
+        corner(modeButton, 7)
+
+        local copyButton = create("TextButton", {
+            Position = UDim2.fromOffset(150, 112),
+            Size = UDim2.fromOffset(148, 30),
+            BackgroundColor3 = Theme.PanelDark,
+            BorderSizePixel = 0,
+            Text = "COPY TEST LOG",
+            TextColor3 = Theme.Text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 10,
+        }, root)
+        corner(copyButton, 7)
+
+        track(modeButton.Activated:Connect(function()
+            if running then
+                status.Text = "Status: stop dulu untuk mengganti test mode"
+                return
+            end
+            testMode = testMode == "SERIAL" and "PARALLEL" or "SERIAL"
+            modeButton.Text = "TEST MODE: " .. testMode
+            logTest("MODE CHANGED -> " .. testMode)
+        end))
+        track(copyButton.Activated:Connect(copyTestLog))
+
+        local function activeCount()
+            local n = 0
+            for _, v in pairs(enabled) do if v then n += 1 end end
+            return n
+        end
+
+        local function updateTileButton()
+            tileButton.Text = ("PILIH TILE (%d AKTIF)"):format(activeCount())
+        end
+
+        local function closePopup()
+            if popup then popup:Destroy(); popup = nil end
+        end
+
+        local function openPopup()
+            if destroyed or popup then return end
+            local gui = Hub.GetGui and Hub.GetGui()
+            if not gui then
+                status.Text = "Status: ScreenGui Hub tidak ditemukan"
+                return
+            end
+
+            popup = create("Frame", {
+                Name = "AutoCollectTilePopup",
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.fromScale(0.5, 0.5),
+                Size = UDim2.fromOffset(292, 310),
+                BackgroundColor3 = Theme.Background,
+                BorderSizePixel = 0,
+                ZIndex = 200,
+            }, gui)
+            corner(popup, 10)
+
+            create("TextLabel", {
+                Position = UDim2.fromOffset(10, 5),
+                Size = UDim2.new(1, -50, 0, 28),
+                BackgroundTransparency = 1,
+                Text = "PILIH TILE TARGET (5 x 5)",
+                TextColor3 = Theme.Text,
+                Font = Enum.Font.GothamBold,
+                TextSize = 12,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 201,
+            }, popup)
+
+            local close = create("TextButton", {
+                AnchorPoint = Vector2.new(1, 0),
+                Position = UDim2.new(1, -8, 0, 7),
+                Size = UDim2.fromOffset(28, 25),
+                BackgroundColor3 = Theme.Red,
+                BorderSizePixel = 0,
+                Text = "X",
+                TextColor3 = Theme.White,
+                Font = Enum.Font.GothamBold,
+                TextSize = 12,
+                ZIndex = 202,
+            }, popup)
+            corner(close, 5)
+
+            local grid = create("Frame", {
+                Position = UDim2.fromOffset(16, 42),
+                Size = UDim2.fromOffset(260, 260),
+                BackgroundTransparency = 1,
+                ZIndex = 201,
+            }, popup)
+            create("UIGridLayout", {
+                CellSize = UDim2.fromOffset(49, 49),
+                CellPadding = UDim2.fromOffset(3, 3),
+                SortOrder = Enum.SortOrder.LayoutOrder,
+            }, grid)
+
+            for dy = -2, 2 do
+                for dx = -2, 2 do
+                    local key = dx .. "," .. dy
+                    if enabled[key] == nil then enabled[key] = true end
+                    local b = create("TextButton", {
+                        BackgroundColor3 = enabled[key] and Theme.Green or Theme.PanelDark,
+                        BorderSizePixel = 0,
+                        Text = (dx == 0 and dy == 0) and "YOU" or (enabled[key] and "ON" or "OFF"),
+                        TextColor3 = Theme.White,
+                        Font = Enum.Font.GothamBold,
+                        TextSize = 10,
+                        ZIndex = 202,
+                    }, grid)
+                    corner(b, 6)
+                    track(b.Activated:Connect(function()
+                        if destroyed then return end
+                        enabled[key] = not enabled[key]
+                        b.Text = (dx == 0 and dy == 0) and (enabled[key] and "YOU ON" or "YOU OFF")
+                            or (enabled[key] and "ON" or "OFF")
+                        b.BackgroundColor3 = enabled[key] and Theme.Green or Theme.PanelDark
+                        updateTileButton()
+                    end))
+                end
+            end
+
+            track(close.Activated:Connect(closePopup))
+        end
+
+        track(tileButton.Activated:Connect(openPopup))
+
+        local function setRunning(value)
+            running = value
+            toggle.Text = running and "STOP" or "START"
+            toggle.BackgroundColor3 = running and Theme.Red or Theme.Green
+            if running then
+                status.Text = "Status: aktif | Remote | radius tile 2"
+            else
+                status.Text = "Status: berhenti"
+            end
+        end
+
+        track(toggle.Activated:Connect(function()
+            if destroyed then return end
+            if not running then
+                if activeCount() == 0 then
+                    status.Text = "Status: pilih minimal satu tile"
+                    return
+                end
+                if not refs.World or not refs.Inv or not refs.State then
+                    local ok, message = discover()
+                    if not ok then
+                        status.Text = "Status: scan gagal - " .. tostring(message)
+                        return
+                    end
+                end
+                if not findDropRefs() then
+                    status.Text = "Status: daftar drop belum ditemukan"
+                    return
+                end
+                testLog = {}
+                logTest(("SESSION START mode=%s selectedTiles=%d"):format(testMode, activeCount()))
+                logTest(("DROP LIST count=%s | itemID3 inventory=%s"):format(
+                    tostring(type(Drops.list) == "table" and #Drops.list or "unknown"),
+                    tostring(inventoryCount(3))
+                ))
+                setRunning(true)
+            else
+                logTest(("SESSION STOP | itemID3 inventory=%s"):format(tostring(inventoryCount(3))))
+                setRunning(false)
+            end
+        end))
+
+        task.spawn(function()
+            task.wait(0.4)
+            if destroyed or (Hub.IsClosing and Hub.IsClosing()) then return end
+            local ok, message = pcall(discover)
+            if not ok then
+                status.Text = "Status: scan error - " .. tostring(message)
+            elseif message then
+                status.Text = "Status: " .. tostring(message)
+            end
+            if ok and refs.World then
+                findDropRefs()
             end
         end)
+
+        task.spawn(function()
+            while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
+                if running then
+                    if not Drops.list then
+                        if os.clock() >= Drops.nextScan then
+                            Drops.nextScan = os.clock() + 3
+                            findDropRefs()
+                        end
+                    else
+                        local ok, err = pcall(remoteTick)
+                        if not ok then
+                            status.Text = "Status: error collect - " .. tostring(err)
+                        end
+                    end
+                end
+                task.wait(0.1)
+            end
+        end)
+
         local function cleanup()
-            if destroyed then return end; destroyed=true; recording=false
-            for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+            if destroyed then return end
+            destroyed = true
+            running = false
+            closePopup()
+            for _, c in ipairs(connections) do
+                pcall(function() c:Disconnect() end)
+            end
             table.clear(connections)
         end
+
         Hub.RegisterCleanup(cleanup)
-        log("Module aktif. Catatan: tanpa hooking/tracing runtime, executor Lua biasa tidak bisa menjamin nama fungsi yang benar-benar dieksekusi. Script ini membandingkan metadata/upvalues sebelum dan sesudah pickup.")
+        updateTileButton()
     end)
 end
