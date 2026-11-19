@@ -17,9 +17,9 @@ return function(Hub)
         local LocalPlayer = Players.LocalPlayer
 
         local CFG = {
-            PutDelay = 80,
-            BreakDelay = 140,
-            BreakStartDelay = 150,
+            PutDelay = 85,
+            BreakDelay = 155,
+            BreakStartDelay = 20,
         }
 
         local Theme = {
