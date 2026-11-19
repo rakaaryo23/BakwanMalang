@@ -1101,6 +1101,143 @@ return function(Hub)
             report("STOP LOOP DIMINTA.")
         end))
 
+        --==================================================
+        -- [L1] PNB MAIN AUTOMATION FUNCTION
+        -- Pemanggilan tunggal: PNB["PNB-UNTIL INVENTORY EMPTY"](...)
+        -- Isi dan urutan proses farming dipertahankan.
+        --==================================================
+
+        local PNB = {}
+
+        PNB["PNB-UNTIL INVENTORY EMPTY"] = function(
+            plan, px, py, targetId, putMs, hitMs, startMs
+        )
+            local function stillRunning()
+                return running and not destroyed and not Hub.IsClosing()
+            end
+
+            local function breakUntilClear(target, phaseName)
+                while stillRunning() do
+                    local broken, message = breakOne(
+                        target.x, target.y, startMs, hitMs
+                    )
+                    report(("%s BREAK TILE %d: %s | %s"):format(
+                        phaseName, target.tileNo,
+                        broken and "OK" or "BELUM BERHASIL",
+                        tostring(message)
+                    ))
+                    if broken then return true end
+                    task.wait(0.05)
+                end
+                return false
+            end
+
+            report(("START | ID LOCKED %d | %d TILE AKTIF | ANCHOR %d,%d"):format(
+                targetId, #plan, px, py
+            ))
+
+            -- FASE AWAL: hanya sekali ketika START ditekan.
+            report("FASE AWAL: SCAN PLACED BLOCK FG/BG.")
+            local occupied = {}
+            for _, target in ipairs(plan) do
+                local fg = tileAt("fg", target.x, target.y)
+                local bg = tileAt("bg", target.x, target.y)
+                if fg == nil or bg == nil then
+                    running = false
+                    report(("STOP: TILE %d TIDAK VALID."):format(target.tileNo))
+                    break
+                elseif fg ~= 0 or bg ~= 0 then
+                    occupied[#occupied + 1] = target
+                end
+            end
+
+            if stillRunning() then
+                for _, target in ipairs(occupied) do
+                    if not stillRunning() then break end
+                    if not breakUntilClear(target, "AWAL") then break end
+                end
+            end
+
+            if stillRunning() then
+                if #occupied > 0 then
+                    report("COLLECT DROP HASIL BREAK AWAL SECARA PARALEL.")
+                    local collected, collectMessage = collectPhaseParallel(plan, px, py)
+                    if not collected then
+                        running = false
+                        report("STOP: COLLECT AWAL GAGAL: " .. tostring(collectMessage))
+                    end
+                else
+                    report("TILE AWAL KOSONG. LANGSUNG KE PUT.")
+                end
+            end
+
+            -- LOOP UTAMA: PUT -> BREAK -> COLLECT. Tidak ada scan placed
+            -- block tambahan di awal setiap putaran.
+            local cycle = 0
+            while stillRunning() do
+                cycle += 1
+                report(("LOOP %d | FASE PUT"):format(cycle))
+                local inventoryEmpty = false
+
+                for _, target in ipairs(plan) do
+                    if not stillRunning() then break end
+
+                    local placed, putMessage = putOne(
+                        target.x, target.y, targetId
+                    )
+                    if not placed then
+                        -- Stok hanya diperiksa setelah PUT ditolak/gagal.
+                        if countItem(targetId) <= 0 then
+                            inventoryEmpty = true
+                            report(("PUT DITOLAK TILE %d: INVENTORY ID %d HABIS."):format(
+                                target.tileNo, targetId
+                            ))
+                            break
+                        else
+                            running = false
+                            report(("STOP: PUT TILE %d GAGAL: %s"):format(
+                                target.tileNo, tostring(putMessage)
+                            ))
+                            break
+                        end
+                    end
+
+                    report(("LOOP %d | PUT TILE %d OK"):format(cycle, target.tileNo))
+                    if putMs > 0 then task.wait(putMs / 1000) end
+                end
+
+                if not stillRunning() then break end
+
+                report(("LOOP %d | FASE BREAK SEMUA TILE AKTIF"):format(cycle))
+                for _, target in ipairs(plan) do
+                    if not stillRunning() then break end
+                    if not breakUntilClear(target, "LOOP") then break end
+                end
+
+                if not stillRunning() then break end
+
+                report(("LOOP %d | FASE COLLECT PARALEL"):format(cycle))
+                local collected, collectMessage = collectPhaseParallel(plan, px, py)
+                if not collected then
+                    running = false
+                    report("STOP: COLLECT BELUM TUNTAS: " .. tostring(collectMessage))
+                    break
+                end
+                report(("LOOP %d | COLLECT SELESAI: %s"):format(
+                    cycle, tostring(collectMessage)
+                ))
+
+                if inventoryEmpty then
+                    running = false
+                    report("LOOP BERHENTI: PUT DITOLAK KARENA INVENTORY ID LOCKED HABIS.")
+                    break
+                end
+            end
+
+            running = false
+            if not destroyed then report("LOOP BERHENTI.") end
+        end
+
         track(startButton.Activated:Connect(function()
             if running then return end
             if not (refs.Inv and refs.World and refs.State and refs.SetTile and refs.Hit) then
@@ -1133,132 +1270,10 @@ return function(Hub)
             running = true
             local targetId = confirmedId
 
-            task.spawn(function()
-                local function stillRunning()
-                    return running and not destroyed and not Hub.IsClosing()
-                end
-
-                local function breakUntilClear(target, phaseName)
-                    while stillRunning() do
-                        local broken, message = breakOne(
-                            target.x, target.y, startMs, hitMs
-                        )
-                        report(("%s BREAK TILE %d: %s | %s"):format(
-                            phaseName, target.tileNo,
-                            broken and "OK" or "BELUM BERHASIL",
-                            tostring(message)
-                        ))
-                        if broken then return true end
-                        task.wait(0.05)
-                    end
-                    return false
-                end
-
-                report(("START | ID LOCKED %d | %d TILE AKTIF | ANCHOR %d,%d"):format(
-                    targetId, #plan, px, py
-                ))
-
-                -- FASE AWAL: hanya sekali ketika START ditekan.
-                report("FASE AWAL: SCAN PLACED BLOCK FG/BG.")
-                local occupied = {}
-                for _, target in ipairs(plan) do
-                    local fg = tileAt("fg", target.x, target.y)
-                    local bg = tileAt("bg", target.x, target.y)
-                    if fg == nil or bg == nil then
-                        running = false
-                        report(("STOP: TILE %d TIDAK VALID."):format(target.tileNo))
-                        break
-                    elseif fg ~= 0 or bg ~= 0 then
-                        occupied[#occupied + 1] = target
-                    end
-                end
-
-                if stillRunning() then
-                    for _, target in ipairs(occupied) do
-                        if not stillRunning() then break end
-                        if not breakUntilClear(target, "AWAL") then break end
-                    end
-                end
-
-                if stillRunning() then
-                    if #occupied > 0 then
-                        report("COLLECT DROP HASIL BREAK AWAL SECARA PARALEL.")
-                        local collected, collectMessage = collectPhaseParallel(plan, px, py)
-                        if not collected then
-                            running = false
-                            report("STOP: COLLECT AWAL GAGAL: " .. tostring(collectMessage))
-                        end
-                    else
-                        report("TILE AWAL KOSONG. LANGSUNG KE PUT.")
-                    end
-                end
-
-                -- LOOP UTAMA: PUT -> BREAK -> COLLECT. Tidak ada scan placed
-                -- block tambahan di awal setiap putaran.
-                local cycle = 0
-                while stillRunning() do
-                    cycle += 1
-                    report(("LOOP %d | FASE PUT"):format(cycle))
-                    local inventoryEmpty = false
-
-                    for _, target in ipairs(plan) do
-                        if not stillRunning() then break end
-
-                        local placed, putMessage = putOne(
-                            target.x, target.y, targetId
-                        )
-                        if not placed then
-                            -- Stok hanya diperiksa setelah PUT ditolak/gagal.
-                            if countItem(targetId) <= 0 then
-                                inventoryEmpty = true
-                                report(("PUT DITOLAK TILE %d: INVENTORY ID %d HABIS."):format(
-                                    target.tileNo, targetId
-                                ))
-                                break
-                            else
-                                running = false
-                                report(("STOP: PUT TILE %d GAGAL: %s"):format(
-                                    target.tileNo, tostring(putMessage)
-                                ))
-                                break
-                            end
-                        end
-
-                        report(("LOOP %d | PUT TILE %d OK"):format(cycle, target.tileNo))
-                        if putMs > 0 then task.wait(putMs / 1000) end
-                    end
-
-                    if not stillRunning() then break end
-
-                    report(("LOOP %d | FASE BREAK SEMUA TILE AKTIF"):format(cycle))
-                    for _, target in ipairs(plan) do
-                        if not stillRunning() then break end
-                        if not breakUntilClear(target, "LOOP") then break end
-                    end
-
-                    if not stillRunning() then break end
-
-                    report(("LOOP %d | FASE COLLECT PARALEL"):format(cycle))
-                    local collected, collectMessage = collectPhaseParallel(plan, px, py)
-                    if not collected then
-                        running = false
-                        report("STOP: COLLECT BELUM TUNTAS: " .. tostring(collectMessage))
-                        break
-                    end
-                    report(("LOOP %d | COLLECT SELESAI: %s"):format(
-                        cycle, tostring(collectMessage)
-                    ))
-
-                    if inventoryEmpty then
-                        running = false
-                        report("LOOP BERHENTI: PUT DITOLAK KARENA INVENTORY ID LOCKED HABIS.")
-                        break
-                    end
-                end
-
-                running = false
-                if not destroyed then report("LOOP BERHENTI.") end
-            end)
+            task.spawn(
+                PNB["PNB-UNTIL INVENTORY EMPTY"],
+                plan, px, py, targetId, putMs, hitMs, startMs
+            )
         end))
 
         -- Monitor hanya selected item sebelum ID dikunci.
