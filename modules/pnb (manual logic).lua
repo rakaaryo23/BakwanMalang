@@ -597,7 +597,7 @@ return function(Hub)
                 return false, "setTile error: " .. tostring(err)
             end
 
-            for _ = 1, 60 do
+            for _ = 1, 5 do
                 if not running or destroyed or Hub.IsClosing() then
                     return false, "dihentikan saat verifikasi PUT"
                 end
