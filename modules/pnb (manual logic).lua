@@ -1171,8 +1171,9 @@ return function(Hub)
                 end
             end
 
-            -- LOOP UTAMA: PUT -> BREAK -> COLLECT. Tidak ada scan placed
-            -- block tambahan di awal setiap putaran.
+            -- LOOP UTAMA: PUT -> BREAK -> COLLECT.
+            -- Jika inventory habis saat fase PUT, tetap coba PUT semua tile,
+            -- lanjut BREAK semua tile, lalu berhenti tanpa COLLECT/loop berikutnya.
             local cycle = 0
             while stillRunning() do
                 cycle += 1
@@ -1185,25 +1186,27 @@ return function(Hub)
                     local placed, putMessage = putOne(
                         target.x, target.y, targetId
                     )
-                    if not placed then
-                        -- Stok hanya diperiksa setelah PUT ditolak/gagal.
-                        if countItem(targetId) <= 0 then
-                            inventoryEmpty = true
-                            report(("PUT DITOLAK TILE %d: INVENTORY ID %d HABIS."):format(
-                                target.tileNo, targetId
-                            ))
-                            break
-                        else
-                            running = false
-                            report(("STOP: PUT TILE %d GAGAL: %s"):format(
-                                target.tileNo, tostring(putMessage)
-                            ))
-                            break
-                        end
+
+                    -- Cek jumlah inventory setelah SETIAP percobaan PUT,
+                    -- terlepas dari PUT berhasil atau ditolak.
+                    if countItem(targetId) <= 0 then
+                        inventoryEmpty = true
+                        report(("INVENTORY ID %d HABIS SETELAH PUT TILE %d."):format(
+                            targetId, target.tileNo
+                        ))
                     end
 
-                    report(("LOOP %d | PUT TILE %d OK"):format(cycle, target.tileNo))
-                    if putMs > 0 then task.wait(putMs / 1000) end
+                    if placed then
+                        report(("LOOP %d | PUT TILE %d OK"):format(cycle, target.tileNo))
+                    else
+                        report(("LOOP %d | PUT TILE %d DICOBA (GAGAL/DITOLAK): %s"):format(
+                            cycle, target.tileNo, tostring(putMessage)
+                        ))
+                    end
+
+                    if placed and putMs > 0 then
+                        task.wait(putMs / 1000)
+                    end
                 end
 
                 if not stillRunning() then break end
@@ -1216,6 +1219,8 @@ return function(Hub)
 
                 if not stillRunning() then break end
 
+                -- COLLECT selalu dijalankan setelah BREAK, termasuk saat
+                -- inventory target sudah habis. Fungsi ini mencakup validasi.
                 report(("LOOP %d | FASE COLLECT PARALEL"):format(cycle))
                 local collected, collectMessage = collectPhaseParallel(plan, px, py)
                 if not collected then
@@ -1227,9 +1232,11 @@ return function(Hub)
                     cycle, tostring(collectMessage)
                 ))
 
+                -- Jika inventory habis saat PUT, berhenti SETELAH seluruh
+                -- COLLECT dan validasinya selesai. Jangan mulai loop berikutnya.
                 if inventoryEmpty then
                     running = false
-                    report("LOOP BERHENTI: PUT DITOLAK KARENA INVENTORY ID LOCKED HABIS.")
+                    report("LOOP BERHENTI: INVENTORY ID LOCKED HABIS. PUT, BREAK, COLLECT, DAN VALIDASI SELESAI.")
                     break
                 end
             end
