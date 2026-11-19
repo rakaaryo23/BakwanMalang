@@ -1,27 +1,31 @@
---==================================================
--- MODULE: GERAK KIRI / KANAN / JUMP
+--==============================================================
+-- MODULE: GERAK MANUAL
 -- Standalone untuk GrowBlox Hub.
 --
--- Mekanisme input mengikuti pola k(8).lua:
---   AutoInput.active + AutoInput.left/right/jump/down
+-- Mekanisme input mengikuti sumber k(8).lua secara langsung:
+--   AutoInput = { active, left, right, jump, down }
 --   WorldMenu.isDown(saved, key, ...)
 --
--- Tidak membaca state dari k.lua dan tidak menjalankan k.lua.
---==================================================
+-- Modul ini HANYA menyediakan input karakter manual (KIRI/KANAN/JUMP).
+-- Tidak ada A*, koordinat, target, auto-farm, atau logika navigasi.
+--==============================================================
 
 return function(Hub)
-    assert(Hub and type(Hub.RegisterTab) == "function",
-        "Module Gerak membutuhkan Hub.RegisterTab")
-    assert(type(Hub.RegisterCleanup) == "function",
-        "Hub.RegisterCleanup tidak tersedia")
+    assert(Hub and type(Hub.RegisterTab) == "function", "Hub.RegisterTab tidak tersedia")
+    assert(type(Hub.RegisterCleanup) == "function", "Hub.RegisterCleanup tidak tersedia")
 
     Hub.RegisterTab("Gerak", function(page)
+        ----------------------------------------------------------------
+        -- IMPORT / SERVICES YANG DIPERLUKAN UNTUK INPUT MOVEMENT
+        -- Mengikuti cara akses service dan PlayerGui pada k(8).lua.
+        ----------------------------------------------------------------
         local Players = game:GetService("Players")
         local UserInputService = game:GetService("UserInputService")
         local LocalPlayer = Players.LocalPlayer
 
-        -- State virtual milik modul ini sendiri.
-        -- Bentuk dan nama field mengikuti AutoInput pada k(8).lua.
+        ----------------------------------------------------------------
+        -- AUTO INPUT: bentuk dan nama field sama seperti k(8).lua.
+        ----------------------------------------------------------------
         local AutoInput = {
             active = false,
             left = false,
@@ -45,6 +49,7 @@ return function(Hub)
         local hookReady = false
         local readCount = 0
         local lastKey = "belum ada"
+        local hookError = "menunggu PlayerGui"
 
         local Theme = {
             Accent = Color3.fromRGB(171, 91, 119),
@@ -55,7 +60,7 @@ return function(Hub)
         }
 
         local function track(connection)
-            table.insert(connections, connection)
+            connections[#connections + 1] = connection
             return connection
         end
 
@@ -74,6 +79,9 @@ return function(Hub)
             corner.Parent = object
         end
 
+        ----------------------------------------------------------------
+        -- UI
+        ----------------------------------------------------------------
         local panel = create("Frame", {
             Name = "GerakPanel",
             Size = UDim2.new(1, 0, 0, 116),
@@ -110,30 +118,27 @@ return function(Hub)
 
         local function updateStatus(message)
             if not status or not status.Parent then return end
-            local mode = AutoInput.active and "virtual input aktif" or "input game normal"
             status.Text = string.format(
                 "Status: %s\nMode: %s | Dibaca game: %s (%d)",
-                message or (hookReady and "WorldMenu terhubung" or "menunggu WorldMenu"),
-                mode,
+                message or (hookReady and "WorldMenu terhubung" or hookError),
+                AutoInput.active and "virtual input aktif" or "input game normal",
                 lastKey,
                 readCount
             )
         end
 
-        local function anyPressed()
-            return AutoInput.left or AutoInput.right or AutoInput.jump or AutoInput.down
-        end
-
+        ----------------------------------------------------------------
+        -- INPUT STATE
+        -- Saat AutoInput.active true, wrapper mengambil alih empat key
+        -- logical persis seperti fungsi isDownWrapper di k(8).lua.
+        ----------------------------------------------------------------
         local function syncActive()
-            -- Saat tidak ada tombol virtual ditekan, fungsi asli game berjalan
-            -- tanpa intervensi. Saat ada tombol ditekan, wrapper mengambil alih
-            -- keempat key logical sama seperti AutoInput.active di k(8).lua.
-            AutoInput.active = anyPressed()
+            AutoInput.active = AutoInput.left or AutoInput.right
+                or AutoInput.jump or AutoInput.down
         end
 
         local function setPressed(key, value)
             if destroyed then return end
-
             AutoInput[key] = value == true
             syncActive()
 
@@ -144,29 +149,76 @@ return function(Hub)
             updateStatus()
         end
 
-        local function releaseAll()
+        local function releaseInput()
+            AutoInput.left = false
+            AutoInput.right = false
+            AutoInput.jump = false
+            AutoInput.down = false
             for _, key in ipairs({ "left", "right", "jump" }) do
-                AutoInput[key] = false
                 heldInputs[key] = {}
                 local button = buttons[key]
                 if button and button.Parent then
                     button.BackgroundColor3 = Theme.Accent
                 end
             end
-            AutoInput.down = false
             syncActive()
             updateStatus()
         end
 
-        -- Salinan pola wrapper k(8).lua. Nama argumen dan urutan pemeriksaan
-        -- sengaja dipertahankan: saved, key, ...
-        local function installMovementHook()
-            local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
-            local gameGui = playerGui and playerGui:FindFirstChild("GameGui")
-            local worldMenu = gameGui and gameGui:FindFirstChild("WorldMenu")
+        ----------------------------------------------------------------
+        -- MOVEMENT HOOK: urutan dan perilaku wrapper disalin dari k(8).lua.
+        -- Perbedaan yang disengaja hanya pengambilan referensi modul: dilakukan
+        -- di task terpisah, tetapi tetap memakai WaitForChild seperti sumber.
+        ----------------------------------------------------------------
+        local function isDownWrapper(saved, key, ...)
+            if AutoInput.active then
+                if key == "keyLeft" then
+                    readCount += 1
+                    lastKey = key
+                    return AutoInput.left
+                end
+                if key == "keyRight" then
+                    readCount += 1
+                    lastKey = key
+                    return AutoInput.right
+                end
+                if key == "keyJump" then
+                    readCount += 1
+                    lastKey = key
+                    return AutoInput.jump
+                end
+                if key == "keyDown" then
+                    readCount += 1
+                    lastKey = key
+                    return AutoInput.down
+                end
+            end
+            return OrigIsDown(saved, key, ...)
+        end
 
-            if not worldMenu or not worldMenu:IsA("ModuleScript") then
-                return false, "GameGui.WorldMenu belum ditemukan"
+        local function installMovementHook()
+            if destroyed or (Hub.IsClosing and Hub.IsClosing()) then
+                return false, "Hub sedang ditutup"
+            end
+            if not LocalPlayer then
+                return false, "Players.LocalPlayer tidak tersedia"
+            end
+
+            -- Ikuti hierarchy k(8).lua, jangan FindFirstChild instan.
+            local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+            if not playerGui then
+                return false, "PlayerGui tidak ditemukan"
+            end
+            local gameGui = playerGui:WaitForChild("GameGui")
+            if not gameGui then
+                return false, "PlayerGui.GameGui tidak ditemukan"
+            end
+            local worldMenu = gameGui:WaitForChild("WorldMenu")
+            if not worldMenu then
+                return false, "GameGui.WorldMenu tidak ditemukan"
+            end
+            if not worldMenu:IsA("ModuleScript") then
+                return false, "GameGui.WorldMenu bukan ModuleScript (Class: " .. worldMenu.ClassName .. ")"
             end
 
             local ok, result = pcall(require, worldMenu)
@@ -180,61 +232,47 @@ return function(Hub)
                 return false, "WorldMenu.isDown bukan function"
             end
 
-            -- Hindari membungkus fungsi yang sama berulang kali.
-            if MenuModule == result and result.isDown == isDownWrapper then
+            -- Jangan pasang wrapper kedua kali pada modul yang sama.
+            if MenuModule == result and rawget(MenuModule, "isDown") == isDownWrapper then
                 hookReady = true
+                hookError = "WorldMenu.isDown berhasil dipasang"
+                updateStatus(hookError)
                 return true
+            end
+
+            -- Jika referensi modul berubah, pulihkan hook lama milik modul ini.
+            if MenuModule and OrigIsDown and isDownWrapper
+                and rawget(MenuModule, "isDown") == isDownWrapper then
+                pcall(function()
+                    MenuModule.isDown = OrigIsDown
+                end)
             end
 
             MenuModule = result
             OrigIsDown = rawget(MenuModule, "isDown")
-
-            local function movementIsDown(saved, key, ...)
-                if AutoInput.active then
-                    if key == "keyLeft" then
-                        readCount += 1
-                        lastKey = key
-                        return AutoInput.left
-                    end
-                    if key == "keyRight" then
-                        readCount += 1
-                        lastKey = key
-                        return AutoInput.right
-                    end
-                    if key == "keyJump" then
-                        readCount += 1
-                        lastKey = key
-                        return AutoInput.jump
-                    end
-                    if key == "keyDown" then
-                        readCount += 1
-                        lastKey = key
-                        return AutoInput.down
-                    end
-                end
-
-                return OrigIsDown(saved, key, ...)
-            end
-
-            isDownWrapper = movementIsDown
-
             local assigned, assignError = pcall(function()
                 MenuModule.isDown = isDownWrapper
             end)
+
             if not assigned or rawget(MenuModule, "isDown") ~= isDownWrapper then
                 hookReady = false
                 return false, "gagal memasang WorldMenu.isDown: " .. tostring(assignError)
             end
 
             hookReady = true
-            updateStatus("WorldMenu.isDown berhasil dipasang")
-            print("[Gerak] WorldMenu.isDown terhubung memakai pola AutoInput k(8).lua.")
+            hookError = "WorldMenu.isDown berhasil dipasang"
+            updateStatus(hookError)
+            print("[Gerak] WorldMenu.isDown terhubung memakai mekanisme k(8).lua.")
             return true
         end
 
-        local function makeHoldButton(key, title)
+        ----------------------------------------------------------------
+        -- HOLD BUTTONS: tahan untuk bergerak, lepas untuk berhenti.
+        ----------------------------------------------------------------
+        local function makeHoldButton(key, title, layoutOrder)
             local button = create("TextButton", {
                 Name = title .. "Button",
+                LayoutOrder = layoutOrder,
                 BackgroundColor3 = Theme.Accent,
                 BorderSizePixel = 0,
                 Text = title,
@@ -266,11 +304,11 @@ return function(Hub)
             end))
         end
 
-        makeHoldButton("left", "KIRI")
-        makeHoldButton("right", "KANAN")
-        makeHoldButton("jump", "JUMP")
+        makeHoldButton("left", "KIRI", 1)
+        makeHoldButton("right", "KANAN", 2)
+        makeHoldButton("jump", "JUMP", 3)
 
-        -- Menangani jari/mouse yang dilepas di luar area tombol.
+        -- Lepas tombol tetap terdeteksi walau jari/mouse keluar dari tombol.
         track(UserInputService.InputEnded:Connect(function(input)
             for _, key in ipairs({ "left", "right", "jump" }) do
                 if heldInputs[key][input] then
@@ -282,16 +320,18 @@ return function(Hub)
 
         pcall(function()
             track(UserInputService.WindowFocusReleased:Connect(function()
-                releaseAll()
+                releaseInput()
             end))
         end)
 
+        ----------------------------------------------------------------
+        -- CLEANUP: selalu lepas input dan pulihkan isDown asli.
+        ----------------------------------------------------------------
         local function cleanup()
             if destroyed then return end
-            releaseAll()
+            releaseInput()
             destroyed = true
 
-            -- Kembalikan fungsi asli hanya jika wrapper modul ini masih terpasang.
             if MenuModule and OrigIsDown and isDownWrapper
                 and rawget(MenuModule, "isDown") == isDownWrapper then
                 pcall(function()
@@ -309,26 +349,27 @@ return function(Hub)
 
         Hub.RegisterCleanup(cleanup)
 
-        -- Pencarian modul dilakukan di task terpisah supaya tidak menahan loader Hub.
+        ----------------------------------------------------------------
+        -- INITIALIZE HOOK ASYNCHRONOUSLY.
+        -- WaitForChild mengikuti source; task.spawn agar tab/loader tidak freeze.
+        ----------------------------------------------------------------
         task.spawn(function()
-            local lastError = "WorldMenu belum siap"
-            for _ = 1, 150 do
-                if destroyed or (Hub.IsClosing and Hub.IsClosing()) then return end
-
-                local ok, err = installMovementHook()
-                if ok then return end
-                lastError = err or lastError
-                task.wait(0.1)
+            local callOk, installed, detail = pcall(installMovementHook)
+            if not callOk then
+                hookReady = false
+                hookError = "Kesalahan saat memasang movement hook: " .. tostring(installed)
+                updateStatus(hookError)
+                warn("[Gerak] " .. hookError)
+                return
             end
-
-            if not destroyed then
-                updateStatus(lastError)
-                warn("[Gerak] " .. tostring(lastError))
+            if not installed then
+                hookReady = false
+                hookError = tostring(detail or "Movement hook tidak berhasil dipasang")
+                updateStatus(hookError)
+                warn("[Gerak] " .. hookError)
             end
         end)
 
-        -- Status diagnostik: membedakan hook terpasang dengan fungsi yang benar-benar
-        -- sedang dipanggil game saat tombol virtual ditekan.
         task.spawn(function()
             while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
                 if hookReady then
@@ -344,6 +385,6 @@ return function(Hub)
             end
         end)
 
-        print("[Gerak] Tab Gerak standalone dibuat.")
+        print("[Gerak] Tab Gerak manual siap.")
     end)
 end
