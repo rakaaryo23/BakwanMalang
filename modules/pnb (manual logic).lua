@@ -948,9 +948,9 @@ return function(Hub)
                     task.wait(0.1)
                 else
                     -- Validasi dua kali, masing-masing berjarak 0,1 detik.
-                    task.wait(0.1)
+                    task.wait(0.2)
                     if #dropsAtTarget(target) == 0 then
-                        task.wait(0.1)
+                        task.wait(0.2)
                         if #dropsAtTarget(target) == 0 then
                             return true, "drop tile sudah diambil (validasi 2x)"
                         end
