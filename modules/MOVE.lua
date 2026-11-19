@@ -100,7 +100,7 @@ return function(Hub)
         --------------------------------------------------------------
         local panel = create("Frame", {
             Name = "GerakPanel",
-            Size = UDim2.new(1, 0, 0, 246),
+            Size = UDim2.new(1, 0, 0, 284),
             BackgroundTransparency = 1,
             BorderSizePixel = 0,
         })
@@ -575,20 +575,105 @@ return function(Hub)
         track(connectButton.Activated:Connect(connectAndScan))
 
         --------------------------------------------------------------
-        -- LIVE STATE REFRESH: TAMPILKAN POSISI TERKINI & STATUS INPUT
+        -- COPY FEEDBACK: SALIN DIAGNOSTIK UNTUK DIKIRIM KE CHAT
         --------------------------------------------------------------
-        local function refreshLiveState()
-            if refs.State then
-                local state = readState(refs.State)
-                if state then
-                    lastState = state
-                else
-                    lastState = nil
-                    scanReady = false
-                end
+        local feedbackButton = create("TextButton", {
+            Name = "CopyFeedbackButton",
+            Position = UDim2.fromOffset(0, 242),
+            Size = UDim2.new(1, 0, 0, 34),
+            BackgroundColor3 = Theme.Accent,
+            BorderSizePixel = 0,
+            Text = "COPY FEEDBACK / DIAGNOSTIK",
+            TextColor3 = Theme.White,
+            Font = Enum.Font.GothamBold,
+            TextSize = 11,
+            AutoButtonColor = true,
+        }, panel)
+        addCorner(feedbackButton, 8)
+
+        local function makeFeedback()
+            local player = refs.Player or Players.LocalPlayer
+            local state = lastState
+            local stateText = "tidak tersedia"
+            if state then
+                stateText = string.format(
+                    "X=%s | Y=%s | facing=%s | vx=%s",
+                    tostring(state.x), tostring(state.y),
+                    tostring(state.facing), tostring(state.vx)
+                )
             end
-            updateStatus()
+
+            local menuClass = refs.WorldMenuInstance
+                and refs.WorldMenuInstance.ClassName or "tidak ditemukan"
+            local menuName = refs.WorldMenuInstance
+                and refs.WorldMenuInstance:GetFullName() or "tidak ditemukan"
+
+            local lines = {
+                "=== GROWBLOX GERAK - FEEDBACK DIAGNOSTIK ===",
+                "Akun: " .. (player and tostring(player.Name) or "tidak terdeteksi"),
+                "Character: " .. (refs.Character and "ADA" or "TIDAK ADA"),
+                "Humanoid: " .. (refs.Humanoid and "ADA" or "TIDAK ADA"),
+                "RootPart: " .. (refs.Root and "ADA" or "TIDAK ADA"),
+                "PlayerGui: " .. (refs.PlayerGui and "DITEMUKAN" or "BELUM"),
+                "GameGui: " .. (refs.GameGui and "DITEMUKAN" or "BELUM"),
+                "WorldMenu instance: " .. menuClass .. " | " .. menuName,
+                "WorldMenu module: " .. (refs.MenuModule and "BERHASIL REQUIRE" or "BELUM"),
+                "isDown hook: " .. (hookReady and "AKTIF" or "BELUM AKTIF"),
+                "World table: " .. (refs.World and "DITEMUKAN" or "BELUM"),
+                "Nama world: " .. tostring(lastWorldName),
+                "Ukuran world: " .. tostring(lastWorldSize),
+                "Player state function: " .. (refs.State and "DITEMUKAN" or "BELUM"),
+                "Player state: " .. stateText,
+                "getgc tersedia: " .. (type(getgc) == "function" and "YA" or "TIDAK"),
+                "Scan ready: " .. tostring(scanReady),
+                "Hook ready: " .. tostring(hookReady),
+                "Sedang scan: " .. tostring(scanning),
+                "Input aktif: " .. tostring(AutoInput.active),
+                "Kiri/Kanan/Jump: " .. tostring(AutoInput.left) .. "/" .. tostring(AutoInput.right) .. "/" .. tostring(AutoInput.jump),
+                "isDown dipanggil: " .. tostring(menuCallCount),
+                "Key dikenali: " .. tostring(readCount),
+                "Key terakhir: " .. tostring(lastKey),
+                "Pesan/error terakhir: " .. tostring(lastError),
+                "Status tambahan: " .. (status and status.Text or "tidak tersedia"),
+                "=== AKHIR FEEDBACK ===",
+            }
+            return table.concat(lines, "\n")
         end
+
+        track(feedbackButton.Activated:Connect(function()
+            if destroyed then return end
+            local feedbackText = makeFeedback()
+
+            local clipboardFunction = nil
+            if type(setclipboard) == "function" then
+                clipboardFunction = setclipboard
+            elseif type(toclipboard) == "function" then
+                clipboardFunction = toclipboard
+            end
+
+            if clipboardFunction then
+                local ok, err = pcall(clipboardFunction, feedbackText)
+                if ok then
+                    feedbackButton.Text = "FEEDBACK BERHASIL DISALIN"
+                    updateStatus("Feedback diagnostik sudah disalin. Tempelkan hasilnya di chat.")
+                else
+                    feedbackButton.Text = "GAGAL MENYALIN - CEK CONSOLE"
+                    warn("[Gerak] Gagal menyalin feedback: " .. tostring(err))
+                    print(feedbackText)
+                    updateStatus("Clipboard gagal; feedback dicetak ke console.")
+                end
+            else
+                feedbackButton.Text = "CLIPBOARD TIDAK TERSEDIA"
+                print(feedbackText)
+                updateStatus("Fungsi clipboard tidak tersedia; feedback dicetak ke console.")
+            end
+
+            task.delay(2.5, function()
+                if feedbackButton and feedbackButton.Parent and not destroyed then
+                    feedbackButton.Text = "COPY FEEDBACK / DIAGNOSTIK"
+                end
+            end)
+        end))
 
         --------------------------------------------------------------
         -- CHARACTER EVENTS + CLEANUP
@@ -631,32 +716,13 @@ return function(Hub)
         Hub.RegisterCleanup(cleanup)
 
         --------------------------------------------------------------
-        -- AUTO INITIALIZATION + RETRY
-        -- Tidak menganggap PlayerGui saja sebagai tanda world siap.
+        -- AUTO INITIALIZATION (SATU KALI)
+        -- Status sengaja tidak diperbarui terus-menerus agar mudah dibaca
+        -- dan di-screenshot. Scan ulang hanya saat tombol ditekan atau
+        -- karakter respawn.
         --------------------------------------------------------------
-        task.spawn(function()
-            local attempts = 0
-            while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
-                attempts += 1
-                connectAndScan()
-                -- Tunggu scan selesai sebelum retry; getgc tidak dipanggil tiap frame.
-                while scanning and not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
-                    task.wait(0.1)
-                end
-                if scanReady and hookReady then break end
-                if attempts >= 20 then break end
-                task.wait(1)
-            end
-        end)
-
-        task.spawn(function()
-            while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
-                refreshLiveState()
-                task.wait(0.5)
-            end
-        end)
-
-        updateStatus("Modul aktif; menghubungkan ke sesi game...")
+        updateStatus("Modul aktif; menjalankan satu kali scan. Tekan HUBUNGKAN / SCAN ULANG GAME untuk mencoba lagi.")
+        task.defer(connectAndScan)
         print("[Gerak] Tab Gerak dibuat. Menjalankan pengenalan akun/world dan movement hook.")
     end)
 end
