@@ -141,7 +141,7 @@ return function(Hub)
             Size = UDim2.new(1, 0, 0, 32),
             BackgroundColor3 = C.accent,
             BorderSizePixel = 0,
-            Text = "SALIN LOG KE CONSOLE",
+            Text = "SALIN FEEDBACK",
             TextColor3 = C.text,
             Font = Enum.Font.GothamBold,
             TextSize = 11,
@@ -295,9 +295,50 @@ return function(Hub)
         end))
 
         track(exportButton.Activated:Connect(function()
-            print("========== INPUT RECORDER LOG ==========")
-            for _, item in ipairs(records) do print(item.line) end
-            print("========== END INPUT RECORDER LOG ==========")
+            -- Salin feedback rekaman ke clipboard, bukan ke Developer Console.
+            local lines = {
+                "========== INPUT RECORDER FEEDBACK ==========" ,
+                "Status: " .. (recording and "MEREKAM" or "BERHENTI"),
+                "Jumlah event: " .. tostring(#records),
+            }
+            for _, item in ipairs(records) do
+                table.insert(lines, item.line)
+            end
+            table.insert(lines, "========== END FEEDBACK ==========")
+            local feedback = table.concat(lines, "\n")
+
+            local copier
+            if type(setclipboard) == "function" then
+                copier = setclipboard
+            elseif type(toclipboard) == "function" then
+                copier = toclipboard
+            elseif type(Clipboard) == "table" and type(Clipboard.set) == "function" then
+                copier = Clipboard.set
+            end
+
+            if not copier then
+                exportButton.Text = "CLIPBOARD TIDAK TERSEDIA"
+                status.Text = "Executor tidak menyediakan fungsi clipboard."
+                status.TextColor3 = C.red
+                return
+            end
+
+            local ok, err = pcall(copier, feedback)
+            if ok then
+                exportButton.Text = "FEEDBACK TERSALIN"
+                status.Text = "Feedback berhasil disalin ke clipboard."
+                status.TextColor3 = C.active
+                task.delay(2, function()
+                    if alive and exportButton and exportButton.Parent then
+                        exportButton.Text = "SALIN FEEDBACK"
+                        updateStatus()
+                    end
+                end)
+            else
+                exportButton.Text = "GAGAL MENYALIN"
+                status.Text = "Clipboard gagal: " .. tostring(err)
+                status.TextColor3 = C.red
+            end
         end))
 
         local function cleanup()
