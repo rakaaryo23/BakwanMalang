@@ -49,7 +49,7 @@ return function(Hub)
         local hookReady = false
         local readCount = 0
         local lastKey = "belum ada"
-        local hookError = "menunggu PlayerGui"
+        local hookError = "belum mulai mencari PlayerGui"
 
         local Theme = {
             Accent = Color3.fromRGB(171, 91, 119),
@@ -204,18 +204,42 @@ return function(Hub)
                 return false, "Players.LocalPlayer tidak tersedia"
             end
 
-            -- Ikuti hierarchy k(8).lua, jangan FindFirstChild instan.
-            local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+            -- Ikuti hierarchy k(8).lua, tetapi tampilkan tahap pencarian dengan jelas.
+            -- Timeout mencegah status menggantung selamanya jika child memang tidak ada.
+            hookError = "mencari LocalPlayer.PlayerGui..."
+            updateStatus(hookError)
+            local playerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
             if not playerGui then
-                return false, "PlayerGui tidak ditemukan"
+                local names = {}
+                for _, child in ipairs(LocalPlayer:GetChildren()) do
+                    names[#names + 1] = child.Name .. " [" .. child.ClassName .. "]"
+                end
+                return false, "PlayerGui tidak muncul setelah 10 detik. Child LocalPlayer: "
+                    .. (#names > 0 and table.concat(names, ", ") or "(kosong)")
             end
-            local gameGui = playerGui:WaitForChild("GameGui")
+
+            hookError = "PlayerGui ditemukan; mencari PlayerGui.GameGui..."
+            updateStatus(hookError)
+            local gameGui = playerGui:WaitForChild("GameGui", 10)
             if not gameGui then
-                return false, "PlayerGui.GameGui tidak ditemukan"
+                local names = {}
+                for _, child in ipairs(playerGui:GetChildren()) do
+                    names[#names + 1] = child.Name .. " [" .. child.ClassName .. "]"
+                end
+                return false, "GameGui tidak muncul setelah 10 detik. Child PlayerGui: "
+                    .. (#names > 0 and table.concat(names, ", ") or "(kosong)")
             end
-            local worldMenu = gameGui:WaitForChild("WorldMenu")
+
+            hookError = "GameGui ditemukan; mencari GameGui.WorldMenu..."
+            updateStatus(hookError)
+            local worldMenu = gameGui:WaitForChild("WorldMenu", 10)
             if not worldMenu then
-                return false, "GameGui.WorldMenu tidak ditemukan"
+                local names = {}
+                for _, child in ipairs(gameGui:GetChildren()) do
+                    names[#names + 1] = child.Name .. " [" .. child.ClassName .. "]"
+                end
+                return false, "WorldMenu tidak muncul setelah 10 detik. Child GameGui: "
+                    .. (#names > 0 and table.concat(names, ", ") or "(kosong)")
             end
             if not worldMenu:IsA("ModuleScript") then
                 return false, "GameGui.WorldMenu bukan ModuleScript (Class: " .. worldMenu.ClassName .. ")"
