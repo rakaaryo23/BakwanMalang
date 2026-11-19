@@ -19,7 +19,7 @@ return function(Hub)
         local CFG = {
             PutDelay = 85,
             BreakDelay = 155,
-            BreakStartDelay = 20,
+            BreakStartDelay = 100,
         }
 
         local Theme = {
