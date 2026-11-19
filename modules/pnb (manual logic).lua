@@ -239,7 +239,7 @@ return function(Hub)
             "Jeda antar HIT BREAK (ms)", CFG.BreakDelay, settingsFrame
         )
         local breakStartBox = makeDelayBox(
-            "Jeda awal BREAK (ms)", CFG.BreakStartDelay, settingsFrame
+            "Jeda awal BREAK TILE (ms)", CFG.BreakStartDelay, settingsFrame
         )
 
         track(settingsButton.Activated:Connect(function()
