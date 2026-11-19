@@ -1,361 +1,349 @@
 --==================================================
--- MODULE: INPUT RECORDER - GROWBLOX HUB
--- Merekam input keyboard/touch dan GUI yang disentuh.
--- Standalone: tidak membutuhkan k.lua, Gerak.lua, atau WorldMenu.
+-- MODULE: GERAK KIRI / KANAN / JUMP
+-- Standalone untuk GrowBlox Hub.
+--
+-- Mekanisme input mengikuti pola k(8).lua:
+--   AutoInput.active + AutoInput.left/right/jump/down
+--   WorldMenu.isDown(saved, key, ...)
+--
+-- Tidak membaca state dari k.lua dan tidak menjalankan k.lua.
 --==================================================
 
 return function(Hub)
     assert(Hub and type(Hub.RegisterTab) == "function",
-        "InputRecorder membutuhkan Hub.RegisterTab")
+        "Module Gerak membutuhkan Hub.RegisterTab")
+    assert(type(Hub.RegisterCleanup) == "function",
+        "Hub.RegisterCleanup tidak tersedia")
 
-    Hub.RegisterTab("Input Recorder", function(page)
+    Hub.RegisterTab("Gerak", function(page)
         local Players = game:GetService("Players")
-        local UIS = game:GetService("UserInputService")
-        local player = Players.LocalPlayer
-        local playerGui = player:WaitForChild("PlayerGui")
+        local UserInputService = game:GetService("UserInputService")
+        local LocalPlayer = Players.LocalPlayer
 
-        local alive = true
-        local recording = false
-        local connections = {}
-        local startedAt = 0
-        local records = {}
-        local sequence = 0
-        local activeInputs = {}
-        local maxLines = 80
-
-        local C = {
-            accent = Color3.fromRGB(171, 91, 119),
-            active = Color3.fromRGB(65, 155, 105),
-            panel = Color3.fromRGB(38, 38, 45),
-            text = Color3.fromRGB(245, 240, 243),
-            muted = Color3.fromRGB(180, 170, 178),
-            red = Color3.fromRGB(170, 70, 75),
+        -- State virtual milik modul ini sendiri.
+        -- Bentuk dan nama field mengikuti AutoInput pada k(8).lua.
+        local AutoInput = {
+            active = false,
+            left = false,
+            right = false,
+            jump = false,
+            down = false,
         }
 
-        local function track(conn)
-            table.insert(connections, conn)
-            return conn
+        local destroyed = false
+        local connections = {}
+        local heldInputs = {
+            left = {},
+            right = {},
+            jump = {},
+        }
+        local buttons = {}
+
+        local MenuModule = nil
+        local OrigIsDown = nil
+        local isDownWrapper = nil
+        local hookReady = false
+        local readCount = 0
+        local lastKey = "belum ada"
+
+        local Theme = {
+            Accent = Color3.fromRGB(171, 91, 119),
+            Active = Color3.fromRGB(65, 155, 105),
+            Text = Color3.fromRGB(76, 43, 57),
+            White = Color3.fromRGB(255, 249, 251),
+            Muted = Color3.fromRGB(139, 96, 111),
+        }
+
+        local function track(connection)
+            table.insert(connections, connection)
+            return connection
         end
 
-        local function make(className, props, parent)
-            local obj = Instance.new(className)
-            for k, v in pairs(props or {}) do obj[k] = v end
-            obj.Parent = parent or page
-            return obj
+        local function create(className, properties, parent)
+            local object = Instance.new(className)
+            for property, value in pairs(properties or {}) do
+                object[property] = value
+            end
+            object.Parent = parent or page
+            return object
         end
 
-        local function round(obj, radius)
-            local c = Instance.new("UICorner")
-            c.CornerRadius = UDim.new(0, radius or 8)
-            c.Parent = obj
+        local function addCorner(object, radius)
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, radius or 8)
+            corner.Parent = object
         end
 
-        local root = make("Frame", {
-            Name = "InputRecorderPanel",
-            Size = UDim2.new(1, 0, 0, 390),
+        local panel = create("Frame", {
+            Name = "GerakPanel",
+            Size = UDim2.new(1, 0, 0, 116),
             BackgroundTransparency = 1,
             BorderSizePixel = 0,
         })
 
-        make("TextLabel", {
-            Name = "Description",
-            Size = UDim2.new(1, 0, 0, 38),
+        local buttonRow = create("Frame", {
+            Name = "ButtonRow",
+            Size = UDim2.new(1, 0, 0, 48),
             BackgroundTransparency = 1,
-            Text = "Rekam keyboard, sentuhan, dan tombol GUI yang disentuh.",
-            TextColor3 = C.text,
+        }, panel)
+
+        create("UIGridLayout", {
+            CellSize = UDim2.new(1 / 3, -6, 1, 0),
+            CellPadding = UDim2.fromOffset(6, 0),
+            FillDirection = Enum.FillDirection.Horizontal,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, buttonRow)
+
+        local status = create("TextLabel", {
+            Name = "GerakStatus",
+            Position = UDim2.fromOffset(0, 54),
+            Size = UDim2.new(1, 0, 0, 58),
+            BackgroundTransparency = 1,
+            Text = "Status: mencari GameGui.WorldMenu...",
+            TextColor3 = Theme.Text,
             Font = Enum.Font.Gotham,
             TextSize = 11,
             TextWrapped = true,
             TextXAlignment = Enum.TextXAlignment.Left,
-        }, root)
+            TextYAlignment = Enum.TextYAlignment.Top,
+        }, panel)
 
-        local status = make("TextLabel", {
-            Name = "RecorderStatus",
-            Position = UDim2.fromOffset(0, 38),
-            Size = UDim2.new(1, 0, 0, 24),
-            BackgroundTransparency = 1,
-            Text = "Status: berhenti | Event: 0",
-            TextColor3 = C.muted,
-            Font = Enum.Font.Gotham,
-            TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }, root)
-
-        local controls = make("Frame", {
-            Position = UDim2.fromOffset(0, 66),
-            Size = UDim2.new(1, 0, 0, 38),
-            BackgroundTransparency = 1,
-        }, root)
-        make("UIListLayout", {
-            FillDirection = Enum.FillDirection.Horizontal,
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, controls)
-
-        local function actionButton(name, caption, color, order)
-            local b = make("TextButton", {
-                Name = name,
-                Size = UDim2.new(0.333, -5, 1, 0),
-                BackgroundColor3 = color,
-                BorderSizePixel = 0,
-                Text = caption,
-                TextColor3 = C.text,
-                Font = Enum.Font.GothamBold,
-                TextSize = 11,
-                LayoutOrder = order,
-                AutoButtonColor = true,
-            }, controls)
-            round(b, 7)
-            return b
+        local function updateStatus(message)
+            if not status or not status.Parent then return end
+            local mode = AutoInput.active and "virtual input aktif" or "input game normal"
+            status.Text = string.format(
+                "Status: %s\nMode: %s | Dibaca game: %s (%d)",
+                message or (hookReady and "WorldMenu terhubung" or "menunggu WorldMenu"),
+                mode,
+                lastKey,
+                readCount
+            )
         end
 
-        local startButton = actionButton("StartRecord", "MULAI REKAM", C.active, 1)
-        local stopButton = actionButton("StopRecord", "STOP", C.red, 2)
-        local clearButton = actionButton("ClearRecord", "BERSIHKAN", C.accent, 3)
-
-        local log = make("ScrollingFrame", {
-            Name = "InputLog",
-            Position = UDim2.fromOffset(0, 112),
-            Size = UDim2.new(1, 0, 0, 232),
-            BackgroundColor3 = C.panel,
-            BorderSizePixel = 0,
-            ScrollBarThickness = 5,
-            CanvasSize = UDim2.new(0, 0, 0, 0),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        }, root)
-        round(log, 7)
-        make("UIPadding", {
-            PaddingTop = UDim.new(0, 6),
-            PaddingBottom = UDim.new(0, 6),
-            PaddingLeft = UDim.new(0, 8),
-            PaddingRight = UDim.new(0, 8),
-        }, log)
-        make("UIListLayout", {
-            Padding = UDim.new(0, 3),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, log)
-
-        local exportButton = make("TextButton", {
-            Name = "CopyLog",
-            Position = UDim2.fromOffset(0, 352),
-            Size = UDim2.new(1, 0, 0, 32),
-            BackgroundColor3 = C.accent,
-            BorderSizePixel = 0,
-            Text = "SALIN FEEDBACK",
-            TextColor3 = C.text,
-            Font = Enum.Font.GothamBold,
-            TextSize = 11,
-        }, root)
-        round(exportButton, 7)
-
-        local function elapsed()
-            if not recording then return 0 end
-            return math.max(0, os.clock() - startedAt)
+        local function anyPressed()
+            return AutoInput.left or AutoInput.right or AutoInput.jump or AutoInput.down
         end
 
-        local function formatTime(seconds)
-            return string.format("%07.3f", seconds)
+        local function syncActive()
+            -- Saat tidak ada tombol virtual ditekan, fungsi asli game berjalan
+            -- tanpa intervensi. Saat ada tombol ditekan, wrapper mengambil alih
+            -- keempat key logical sama seperti AutoInput.active di k(8).lua.
+            AutoInput.active = anyPressed()
         end
 
-        local function updateStatus()
-            status.Text = string.format("Status: %s | Event: %d",
-                recording and "MEREKAM" or "berhenti", #records)
-            status.TextColor3 = recording and C.active or C.muted
-        end
+        local function setPressed(key, value)
+            if destroyed then return end
 
-        local function addRecord(kind, input, target, extra)
-            if not recording then return end
-            sequence += 1
-            local userInputType = input and input.UserInputType and input.UserInputType.Name or "?"
-            local keyCode = input and input.KeyCode and input.KeyCode.Name or "Unknown"
-            local line = string.format("[%s] %s | Type=%s | Key=%s",
-                formatTime(elapsed()), kind, userInputType, keyCode)
-            if target and target ~= "" then line ..= " | Target=" .. target end
-            if extra and extra ~= "" then line ..= " | " .. extra end
+            AutoInput[key] = value == true
+            syncActive()
 
-            table.insert(records, {
-                time = elapsed(), kind = kind, inputType = userInputType,
-                keyCode = keyCode, target = target or "", line = line,
-            })
-
-            local label = make("TextLabel", {
-                Name = "Event_" .. sequence,
-                Size = UDim2.new(1, -4, 0, 30),
-                BackgroundTransparency = 1,
-                Text = line,
-                TextColor3 = C.text,
-                Font = Enum.Font.Code,
-                TextSize = 10,
-                TextWrapped = true,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                LayoutOrder = sequence,
-            }, log)
-            if #records > maxLines then
-                local oldest = log:FindFirstChild("Event_" .. (sequence - maxLines))
-                if oldest then oldest:Destroy() end
+            local button = buttons[key]
+            if button and button.Parent then
+                button.BackgroundColor3 = AutoInput[key] and Theme.Active or Theme.Accent
             end
             updateStatus()
-            task.defer(function()
-                if log and log.Parent then
-                    log.CanvasPosition = Vector2.new(0, math.max(0, log.AbsoluteCanvasSize.Y))
+        end
+
+        local function releaseAll()
+            for _, key in ipairs({ "left", "right", "jump" }) do
+                AutoInput[key] = false
+                heldInputs[key] = {}
+                local button = buttons[key]
+                if button and button.Parent then
+                    button.BackgroundColor3 = Theme.Accent
                 end
+            end
+            AutoInput.down = false
+            syncActive()
+            updateStatus()
+        end
+
+        -- Salinan pola wrapper k(8).lua. Nama argumen dan urutan pemeriksaan
+        -- sengaja dipertahankan: saved, key, ...
+        local function installMovementHook()
+            local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+            local gameGui = playerGui and playerGui:FindFirstChild("GameGui")
+            local worldMenu = gameGui and gameGui:FindFirstChild("WorldMenu")
+
+            if not worldMenu or not worldMenu:IsA("ModuleScript") then
+                return false, "GameGui.WorldMenu belum ditemukan"
+            end
+
+            local ok, result = pcall(require, worldMenu)
+            if not ok then
+                return false, "require WorldMenu gagal: " .. tostring(result)
+            end
+            if type(result) ~= "table" then
+                return false, "WorldMenu tidak mengembalikan table"
+            end
+            if type(rawget(result, "isDown")) ~= "function" then
+                return false, "WorldMenu.isDown bukan function"
+            end
+
+            -- Hindari membungkus fungsi yang sama berulang kali.
+            if MenuModule == result and result.isDown == isDownWrapper then
+                hookReady = true
+                return true
+            end
+
+            MenuModule = result
+            OrigIsDown = rawget(MenuModule, "isDown")
+
+            local function movementIsDown(saved, key, ...)
+                if AutoInput.active then
+                    if key == "keyLeft" then
+                        readCount += 1
+                        lastKey = key
+                        return AutoInput.left
+                    end
+                    if key == "keyRight" then
+                        readCount += 1
+                        lastKey = key
+                        return AutoInput.right
+                    end
+                    if key == "keyJump" then
+                        readCount += 1
+                        lastKey = key
+                        return AutoInput.jump
+                    end
+                    if key == "keyDown" then
+                        readCount += 1
+                        lastKey = key
+                        return AutoInput.down
+                    end
+                end
+
+                return OrigIsDown(saved, key, ...)
+            end
+
+            isDownWrapper = movementIsDown
+
+            local assigned, assignError = pcall(function()
+                MenuModule.isDown = isDownWrapper
             end)
+            if not assigned or rawget(MenuModule, "isDown") ~= isDownWrapper then
+                hookReady = false
+                return false, "gagal memasang WorldMenu.isDown: " .. tostring(assignError)
+            end
+
+            hookReady = true
+            updateStatus("WorldMenu.isDown berhasil dipasang")
+            print("[Gerak] WorldMenu.isDown terhubung memakai pola AutoInput k(8).lua.")
+            return true
         end
 
-        local function isRecorderObject(obj)
-            return obj == root or obj:IsDescendantOf(root)
+        local function makeHoldButton(key, title)
+            local button = create("TextButton", {
+                Name = title .. "Button",
+                BackgroundColor3 = Theme.Accent,
+                BorderSizePixel = 0,
+                Text = title,
+                TextColor3 = Theme.White,
+                Font = Enum.Font.GothamBold,
+                TextSize = 13,
+                AutoButtonColor = false,
+                Active = true,
+                Selectable = false,
+            }, buttonRow)
+            addCorner(button, 8)
+            buttons[key] = button
+
+            track(button.InputBegan:Connect(function(input)
+                if destroyed then return end
+                local inputType = input.UserInputType
+                if inputType == Enum.UserInputType.MouseButton1
+                    or inputType == Enum.UserInputType.Touch then
+                    heldInputs[key][input] = true
+                    setPressed(key, true)
+                end
+            end))
+
+            track(button.InputEnded:Connect(function(input)
+                if heldInputs[key][input] then
+                    heldInputs[key][input] = nil
+                    setPressed(key, next(heldInputs[key]) ~= nil)
+                end
+            end))
         end
 
-        -- Cari elemen GUI paling atas tepat di koordinat sentuhan.
-        local function guiAt(position)
-            local bestButton, bestButtonZ = nil, -math.huge
-            local bestObject, bestObjectZ = nil, -math.huge
-            for _, obj in ipairs(playerGui:GetDescendants()) do
-                if obj:IsA("GuiObject") and obj.Visible and not isRecorderObject(obj) then
-                    local ok, inside = pcall(function()
-                        local p, s = obj.AbsolutePosition, obj.AbsoluteSize
-                        return position.X >= p.X and position.X <= p.X + s.X
-                            and position.Y >= p.Y and position.Y <= p.Y + s.Y
-                    end)
-                    if ok and inside then
-                        local z = obj.ZIndex
-                        if z >= bestObjectZ then bestObject, bestObjectZ = obj, z end
-                        if obj:IsA("GuiButton") and z >= bestButtonZ then
-                            bestButton, bestButtonZ = obj, z
-                        end
-                    end
+        makeHoldButton("left", "KIRI")
+        makeHoldButton("right", "KANAN")
+        makeHoldButton("jump", "JUMP")
+
+        -- Menangani jari/mouse yang dilepas di luar area tombol.
+        track(UserInputService.InputEnded:Connect(function(input)
+            for _, key in ipairs({ "left", "right", "jump" }) do
+                if heldInputs[key][input] then
+                    heldInputs[key][input] = nil
+                    setPressed(key, next(heldInputs[key]) ~= nil)
                 end
             end
-            -- Prioritaskan tombol yang benar-benar dapat ditekan; bila kontrol
-            -- memakai joystick/frame, tampilkan GuiObject teratas sebagai fallback.
-            local best = bestButton or bestObject
-            if best then return best:GetFullName() .. " [" .. best.ClassName .. "]" end
-            return "GUI tidak teridentifikasi"
-        end
-
-        local function inputId(input)
-            return tostring(input)
-        end
-
-        track(UIS.InputBegan:Connect(function(input, gameProcessed)
-            if not recording then return end
-            local target = ""
-            if input.UserInputType == Enum.UserInputType.Touch then
-                target = guiAt(Vector2.new(input.Position.X, input.Position.Y))
-            elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-                local mouse = UIS:GetMouseLocation()
-                target = guiAt(mouse)
-            end
-            activeInputs[inputId(input)] = os.clock()
-            addRecord("DOWN", input, target,
-                gameProcessed and "GameProcessed=true" or "GameProcessed=false")
         end))
 
-        track(UIS.InputEnded:Connect(function(input, gameProcessed)
-            if not recording then return end
-            local id = inputId(input)
-            local began = activeInputs[id]
-            local duration = began and (os.clock() - began) or nil
-            activeInputs[id] = nil
-            addRecord("UP", input, "", duration and string.format("Held=%.3fs", duration)
-                or (gameProcessed and "GameProcessed=true" or "GameProcessed=false"))
-        end))
-
-        track(startButton.Activated:Connect(function()
-            if recording then return end
-            records = {}
-            sequence = 0
-            activeInputs = {}
-            for _, child in ipairs(log:GetChildren()) do
-                if child:IsA("TextLabel") then child:Destroy() end
-            end
-            startedAt = os.clock()
-            recording = true
-            updateStatus()
-            print("[InputRecorder] RECORDING START")
-        end))
-
-        track(stopButton.Activated:Connect(function()
-            if not recording then return end
-            recording = false
-            activeInputs = {}
-            updateStatus()
-            print("[InputRecorder] RECORDING STOP | events=" .. #records)
-        end))
-
-        track(clearButton.Activated:Connect(function()
-            recording = false
-            records = {}
-            sequence = 0
-            activeInputs = {}
-            for _, child in ipairs(log:GetChildren()) do
-                if child:IsA("TextLabel") then child:Destroy() end
-            end
-            updateStatus()
-        end))
-
-        track(exportButton.Activated:Connect(function()
-            -- Salin feedback rekaman ke clipboard, bukan ke Developer Console.
-            local lines = {
-                "========== INPUT RECORDER FEEDBACK ==========" ,
-                "Status: " .. (recording and "MEREKAM" or "BERHENTI"),
-                "Jumlah event: " .. tostring(#records),
-            }
-            for _, item in ipairs(records) do
-                table.insert(lines, item.line)
-            end
-            table.insert(lines, "========== END FEEDBACK ==========")
-            local feedback = table.concat(lines, "\n")
-
-            local copier
-            if type(setclipboard) == "function" then
-                copier = setclipboard
-            elseif type(toclipboard) == "function" then
-                copier = toclipboard
-            elseif type(Clipboard) == "table" and type(Clipboard.set) == "function" then
-                copier = Clipboard.set
-            end
-
-            if not copier then
-                exportButton.Text = "CLIPBOARD TIDAK TERSEDIA"
-                status.Text = "Executor tidak menyediakan fungsi clipboard."
-                status.TextColor3 = C.red
-                return
-            end
-
-            local ok, err = pcall(copier, feedback)
-            if ok then
-                exportButton.Text = "FEEDBACK TERSALIN"
-                status.Text = "Feedback berhasil disalin ke clipboard."
-                status.TextColor3 = C.active
-                task.delay(2, function()
-                    if alive and exportButton and exportButton.Parent then
-                        exportButton.Text = "SALIN FEEDBACK"
-                        updateStatus()
-                    end
-                end)
-            else
-                exportButton.Text = "GAGAL MENYALIN"
-                status.Text = "Clipboard gagal: " .. tostring(err)
-                status.TextColor3 = C.red
-            end
-        end))
+        pcall(function()
+            track(UserInputService.WindowFocusReleased:Connect(function()
+                releaseAll()
+            end))
+        end)
 
         local function cleanup()
-            if not alive then return end
-            alive = false
-            recording = false
-            for _, conn in ipairs(connections) do
-                pcall(function() conn:Disconnect() end)
+            if destroyed then return end
+            releaseAll()
+            destroyed = true
+
+            -- Kembalikan fungsi asli hanya jika wrapper modul ini masih terpasang.
+            if MenuModule and OrigIsDown and isDownWrapper
+                and rawget(MenuModule, "isDown") == isDownWrapper then
+                pcall(function()
+                    MenuModule.isDown = OrigIsDown
+                end)
+            end
+
+            for _, connection in ipairs(connections) do
+                pcall(function()
+                    connection:Disconnect()
+                end)
             end
             table.clear(connections)
         end
 
-        if type(Hub.RegisterCleanup) == "function" then
-            Hub.RegisterCleanup(cleanup)
-        end
+        Hub.RegisterCleanup(cleanup)
 
-        updateStatus()
-        print("[InputRecorder] Tab siap. Tekan MULAI REKAM, lalu sentuh tombol kontrol game.")
+        -- Pencarian modul dilakukan di task terpisah supaya tidak menahan loader Hub.
+        task.spawn(function()
+            local lastError = "WorldMenu belum siap"
+            for _ = 1, 150 do
+                if destroyed or (Hub.IsClosing and Hub.IsClosing()) then return end
+
+                local ok, err = installMovementHook()
+                if ok then return end
+                lastError = err or lastError
+                task.wait(0.1)
+            end
+
+            if not destroyed then
+                updateStatus(lastError)
+                warn("[Gerak] " .. tostring(lastError))
+            end
+        end)
+
+        -- Status diagnostik: membedakan hook terpasang dengan fungsi yang benar-benar
+        -- sedang dipanggil game saat tombol virtual ditekan.
+        task.spawn(function()
+            while not destroyed and not (Hub.IsClosing and Hub.IsClosing()) do
+                if hookReady then
+                    if AutoInput.active and readCount > 0 then
+                        updateStatus("game memanggil isDown; input virtual sedang dibaca")
+                    elseif AutoInput.active then
+                        updateStatus("tombol ditekan; menunggu game membaca isDown")
+                    else
+                        updateStatus("WorldMenu terhubung; siap menerima tombol")
+                    end
+                end
+                task.wait(0.5)
+            end
+        end)
+
+        print("[Gerak] Tab Gerak standalone dibuat.")
     end)
 end
