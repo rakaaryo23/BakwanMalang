@@ -2,6 +2,12 @@
 -- MODULE: GERAK KANAN / KIRI / JUMP
 -- Untuk GrowBlox Hub
 -- Letakkan file ini langsung di folder: modules/
+--
+-- FIX:
+-- - Tidak memakai WaitForChild pada jalur pemuatan utama.
+-- - Pencarian WorldMenu berjalan di task terpisah.
+-- - Tidak menahan LoadAllModules() milik main.lua.
+-- - Cleanup mengembalikan WorldMenu.isDown jika masih memakai wrapper.
 --==================================================
 
 return function(Hub)
@@ -13,8 +19,6 @@ return function(Hub)
         local UserInputService = game:GetService("UserInputService")
 
         local LocalPlayer = Players.LocalPlayer
-        local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-        local GameGui = PlayerGui:WaitForChild("GameGui")
 
         local destroyed = false
         local connections = {}
@@ -29,42 +33,12 @@ return function(Hub)
             jump = false,
         }
 
-        -- Hubungkan ke kontrol gerak asli GrowBlox.
-        local menuModule
-        local originalIsDown
-        local movementWrapper
+        local menuModule = nil
+        local originalIsDown = nil
+        local movementWrapper = nil
         local movementReady = false
 
-        local moduleOK, result = pcall(function()
-            return require(GameGui:WaitForChild("WorldMenu"))
-        end)
-
-        if moduleOK and type(result) == "table"
-            and type(rawget(result, "isDown")) == "function" then
-
-            menuModule = result
-            originalIsDown = rawget(menuModule, "isDown")
-
-            local function movementIsDown(saved, key, ...)
-                if key == "keyLeft" and pressed.left then
-                    return true
-                elseif key == "keyRight" and pressed.right then
-                    return true
-                elseif key == "keyJump" and pressed.jump then
-                    return true
-                end
-
-                return originalIsDown(saved, key, ...)
-            end
-
-            movementWrapper = movementIsDown
-            menuModule.isDown = movementWrapper
-            movementReady = true
-        end
-
         local Theme = {
-            Background = Color3.fromRGB(250, 220, 228),
-            Panel = Color3.fromRGB(239, 194, 207),
             Accent = Color3.fromRGB(171, 91, 119),
             Active = Color3.fromRGB(65, 155, 105),
             Text = Color3.fromRGB(76, 43, 57),
@@ -105,15 +79,7 @@ return function(Hub)
             })
         end
 
-        local buttons = {}
-
-        local status = label(
-            movementReady
-                and "Status: kontrol gerak terhubung."
-                or "Status: WorldMenu.isDown tidak ditemukan.",
-            34
-        )
-
+        local status = label("Status: mencari kontrol gerak game...", 34)
         label("Tekan dan tahan tombol untuk bergerak. Lepaskan untuk berhenti.", 34)
 
         local buttonRow = create("Frame", {
@@ -128,12 +94,14 @@ return function(Hub)
             SortOrder = Enum.SortOrder.LayoutOrder,
         }, buttonRow)
 
+        local buttons = {}
+
         local function setPressed(key, value)
-            if destroyed or not movementReady then return end
+            if destroyed then return end
 
             pressed[key] = value == true
 
-            local button = buttons and buttons[key]
+            local button = buttons[key]
             if button and button.Parent then
                 button.BackgroundColor3 = pressed[key]
                     and Theme.Active or Theme.Accent
@@ -150,16 +118,10 @@ return function(Hub)
                 Font = Enum.Font.GothamBold,
                 TextSize = 13,
                 AutoButtonColor = false,
-                Active = movementReady,
+                Active = true,
             }, buttonRow)
             corner(button, 8)
             buttons[key] = button
-
-            if not movementReady then
-                button.BackgroundColor3 = Theme.Muted
-                button.TextTransparency = 0.25
-                return
-            end
 
             track(button.InputBegan:Connect(function(input)
                 if destroyed then return end
@@ -184,7 +146,6 @@ return function(Hub)
         makeHoldButton("right", "KANAN")
         makeHoldButton("jump", "JUMP")
 
-        -- Pastikan tombol dilepas walau jari/mouse dilepas di luar tombol.
         track(UserInputService.InputEnded:Connect(function(input)
             for key, held in pairs(heldInputs) do
                 if held == input then
@@ -194,7 +155,6 @@ return function(Hub)
             end
         end))
 
-        -- Lepas input jika jendela kehilangan fokus.
         pcall(function()
             track(UserInputService.WindowFocusReleased:Connect(function()
                 for key in pairs(pressed) do
@@ -218,12 +178,16 @@ return function(Hub)
 
         local function cleanup()
             if destroyed then return end
+
             releaseAll()
             destroyed = true
 
             if menuModule and originalIsDown
+                and movementWrapper
                 and rawget(menuModule, "isDown") == movementWrapper then
-                menuModule.isDown = originalIsDown
+                pcall(function()
+                    menuModule.isDown = originalIsDown
+                end)
             end
 
             for _, connection in ipairs(connections) do
@@ -236,6 +200,93 @@ return function(Hub)
 
         Hub.RegisterCleanup(cleanup)
 
-        print("[Gerak] Module Kiri / Kanan / Jump dimuat.")
+        -- PENTING: pencarian game module dilakukan di task terpisah.
+        -- Tidak ada WaitForChild yang dapat menahan loader main.lua.
+        task.spawn(function()
+            local playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+            local gameGui = playerGui and playerGui:FindFirstChild("GameGui")
+            local worldMenu = gameGui and gameGui:FindFirstChild("WorldMenu")
+
+            -- Jika UI game belum siap, tunggu terbatas hanya di task ini.
+            for _ = 1, 100 do
+                if destroyed or Hub.IsClosing() then return end
+
+                if not playerGui then
+                    playerGui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+                end
+                if playerGui and not gameGui then
+                    gameGui = playerGui:FindFirstChild("GameGui")
+                end
+                if gameGui and not worldMenu then
+                    worldMenu = gameGui:FindFirstChild("WorldMenu")
+                end
+
+                if worldMenu then break end
+                task.wait(0.1)
+            end
+
+            if destroyed or Hub.IsClosing() then return end
+
+            if not worldMenu then
+                if status and status.Parent then
+                    status.Text = "Status: WorldMenu tidak ditemukan (timeout)."
+                end
+                warn("[Gerak] WorldMenu tidak ditemukan; UI Hub tetap berjalan.")
+                return
+            end
+
+            local ok, result = pcall(require, worldMenu)
+            if not ok or type(result) ~= "table"
+                or type(rawget(result, "isDown")) ~= "function" then
+                if status and status.Parent then
+                    status.Text = "Status: gagal menghubungkan WorldMenu.isDown."
+                end
+                warn("[Gerak] Gagal require WorldMenu:", result)
+                return
+            end
+
+            if destroyed or Hub.IsClosing() then return end
+
+            menuModule = result
+            originalIsDown = rawget(menuModule, "isDown")
+
+            local function movementIsDown(saved, key, ...)
+                if key == "keyLeft" and pressed.left then
+                    return true
+                elseif key == "keyRight" and pressed.right then
+                    return true
+                elseif key == "keyJump" and pressed.jump then
+                    return true
+                end
+
+                return originalIsDown(saved, key, ...)
+            end
+
+            movementWrapper = movementIsDown
+
+            local assigned, assignError = pcall(function()
+                menuModule.isDown = movementWrapper
+            end)
+
+            if not assigned then
+                menuModule = nil
+                originalIsDown = nil
+                movementWrapper = nil
+
+                if status and status.Parent then
+                    status.Text = "Status: gagal memasang kontrol gerak."
+                end
+                warn("[Gerak] Gagal memasang wrapper:", assignError)
+                return
+            end
+
+            movementReady = true
+            if status and status.Parent then
+                status.Text = "Status: kontrol KIRI / KANAN / JUMP terhubung."
+            end
+            print("[Gerak] Kontrol Kiri / Kanan / Jump terhubung.")
+        end)
+
+        print("[Gerak] Tab dibuat; pencarian kontrol berjalan terpisah.")
     end)
 end
