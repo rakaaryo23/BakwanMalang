@@ -158,6 +158,8 @@ return function(Hub)
 
         --==================================================
         -- [C] MAIN SUBMENU UI
+        -- UI saja yang diatur ulang. Referensi tombol dan TextBox
+        -- tetap dipakai oleh event serta logic automation di bawah.
         --==================================================
 
         local list = create("UIListLayout", {
@@ -165,59 +167,141 @@ return function(Hub)
             SortOrder = Enum.SortOrder.LayoutOrder,
         }, page)
 
-        statusLabel = makeLabel("Status: idle | menunggu perintah", 34)
-        statusLabel.LayoutOrder = 1
-
-        selectedLabel = makeLabel("Inventory: tekan MANUAL SCAN INVENTORY", 28)
-        selectedLabel.LayoutOrder = 2
-
-        local areaLabel = makeLabel(
-            "TARGET TILE: 7, 8, 9 | default ON",
-            24
+        -- Tombol judul menjadi satu-satunya kontrol buka/tutup.
+        local mainToggle = makeButton(
+            "PUT AND BREAK - INVENTORY HABIS  ▼", 36, page, Theme.PanelDark
         )
-        areaLabel.LayoutOrder = 3
+        mainToggle.TextColor3 = Theme.Text
+        mainToggle.LayoutOrder = 1
+        mainToggle.TextSize = 11
 
-        tileButton = makeButton("SELECT TILE: 7 ON | 8 ON | 9 ON", 34, page, Theme.PanelDark)
-        tileButton.TextColor3 = Theme.Text
-        tileButton.LayoutOrder = 4
-
-        local scanButton = makeButton(
-            "MANUAL SCAN INVENTORY", 32, page, Theme.PanelDark
-        )
-        scanButton.TextColor3 = Theme.Text
-        scanButton.LayoutOrder = 5
-
-        local lockButton = makeButton("LOCK SELECTED", 32)
-        lockButton.LayoutOrder = 6
-
-        local previewButton = makeButton(
-            "PREVIEW TARGET", 32, page, Theme.PanelDark
-        )
-        previewButton.TextColor3 = Theme.Text
-        previewButton.LayoutOrder = 7
-
-        local startButton = makeButton(
-            "START LOOP", 36, page, Theme.Green
-        )
-        startButton.LayoutOrder = 8
-
-        local stopButton = makeButton("STOP LOOP", 32, page, Theme.Red)
-        stopButton.LayoutOrder = 9
-
-        local settingsButton = makeButton(
-            "PENGATURAN DELAY  ▼", 30, page, Theme.PanelDark
-        )
-        settingsButton.TextColor3 = Theme.Text
-        settingsButton.LayoutOrder = 10
-
-        local settingsFrame = create("Frame", {
+        -- Semua isi submenu berada di dalam panel ini.
+        local mainPanel = create("Frame", {
+            Name = "PutBreakInventoryPanel",
             Size = UDim2.new(1, 0, 0, 0),
             AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundColor3 = Theme.Panel,
             BorderSizePixel = 0,
             Visible = false,
-            LayoutOrder = 11,
+            LayoutOrder = 2,
         }, page)
+        corner(mainPanel, 8)
+
+        create("UIPadding", {
+            PaddingTop = UDim.new(0, 8),
+            PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+        }, mainPanel)
+
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, mainPanel)
+
+        statusLabel = makeLabel(
+            "Status: idle | menunggu perintah", 34, mainPanel
+        )
+        statusLabel.LayoutOrder = 1
+
+        selectedLabel = makeLabel(
+            "Inventory: tekan MANUAL SCAN INVENTORY", 28, mainPanel
+        )
+        selectedLabel.LayoutOrder = 2
+
+        local areaLabel = makeLabel(
+            "TARGET TILE: 7, 8, 9 | default ON", 24, mainPanel
+        )
+        areaLabel.LayoutOrder = 3
+
+        -- Dua baris tombol memakai tinggi yang sama.
+        -- Tinggi dibuat cukup untuk teks panjang pada baris pertama.
+        local buttonRowHeight = 58
+        local buttonGap = 6
+
+        local rowOne = create("Frame", {
+            Name = "PrimaryButtonRow",
+            Size = UDim2.new(1, 0, 0, buttonRowHeight),
+            BackgroundTransparency = 1,
+            LayoutOrder = 4,
+        }, mainPanel)
+
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            HorizontalAlignment = Enum.HorizontalAlignment.Left,
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Padding = UDim.new(0, buttonGap),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, rowOne)
+
+        local rowTwo = create("Frame", {
+            Name = "SecondaryButtonRow",
+            Size = UDim2.new(1, 0, 0, buttonRowHeight),
+            BackgroundTransparency = 1,
+            LayoutOrder = 5,
+        }, mainPanel)
+
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            HorizontalAlignment = Enum.HorizontalAlignment.Left,
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            Padding = UDim.new(0, buttonGap),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, rowTwo)
+
+        local function makeRowButton(text, parent, color, order)
+            local b = makeButton(text, buttonRowHeight, parent, color)
+            b.Size = UDim2.new(1 / 3, -4, 1, 0)
+            b.TextSize = 9
+            b.TextWrapped = true
+            b.LayoutOrder = order
+            return b
+        end
+
+        tileButton = makeRowButton(
+            "SELECT TILE: 7 ON | 8 ON | 9 ON",
+            rowOne, Theme.PanelDark, 1
+        )
+        tileButton.TextColor3 = Theme.Text
+
+        local scanButton = makeRowButton(
+            "MANUAL SCAN INVENTORY",
+            rowOne, Theme.PanelDark, 2
+        )
+        scanButton.TextColor3 = Theme.Text
+
+        local lockButton = makeRowButton(
+            "LOCK SELECTED",
+            rowOne, Theme.PanelDark, 3
+        )
+        lockButton.TextColor3 = Theme.Text
+
+        local previewButton = makeRowButton(
+            "PREVIEW TARGET",
+            rowTwo, Theme.PanelDark, 1
+        )
+        previewButton.TextColor3 = Theme.Text
+
+        local startButton = makeRowButton(
+            "START LOOP",
+            rowTwo, Theme.Green, 2
+        )
+
+        local stopButton = makeRowButton(
+            "STOP LOOP",
+            rowTwo, Theme.Red, 3
+        )
+
+        -- Panel delay langsung terlihat saat panel utama dibuka.
+        local settingsFrame = create("Frame", {
+            Name = "DelaySettings",
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = Theme.PanelDark,
+            BorderSizePixel = 0,
+            Visible = true,
+            LayoutOrder = 6,
+        }, mainPanel)
         corner(settingsFrame, 8)
 
         create("UIPadding", {
@@ -242,11 +326,11 @@ return function(Hub)
             "Jeda awal BREAK TILE (ms)", CFG.BreakStartDelay, settingsFrame
         )
 
-        track(settingsButton.Activated:Connect(function()
-            settingsFrame.Visible = not settingsFrame.Visible
-            settingsButton.Text = settingsFrame.Visible
-                and "PENGATURAN DELAY  ▲"
-                or "PENGATURAN DELAY  ▼"
+        track(mainToggle.Activated:Connect(function()
+            mainPanel.Visible = not mainPanel.Visible
+            mainToggle.Text = mainPanel.Visible
+                and "PUT AND BREAK - INVENTORY HABIS  ▲"
+                or "PUT AND BREAK - INVENTORY HABIS  ▼"
         end))
 
         --==================================================
@@ -272,11 +356,11 @@ return function(Hub)
             popup = create("Frame", {
                 Name = "TileSelectPopup",
                 Size = UDim2.new(1, -12, 0, 150),
-                Position = UDim2.new(0, 6, 0, 6),
+                Position = UDim2.new(0, 0, 1, 4),
                 BackgroundColor3 = Theme.Background,
                 BorderSizePixel = 0,
                 ZIndex = 20,
-            }, page)
+            }, tileButton)
             corner(popup, 8)
 
             create("TextLabel", {
