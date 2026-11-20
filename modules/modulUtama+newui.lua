@@ -1,15 +1,23 @@
 --==================================================
--- MODULE: AUTO PUT + BREAK + COLLECT (TILES 7-9)
--- File ini hanya berisi submenu. Tempel/ganti satu blok menu
--- pada script GrowBlox Hub yang sudah memiliki Hub.RegisterTab.
+-- MAIN MODULE: MODUL FUNGSI UTAMA
+-- Satu Hub.RegisterTab yang berisi dua panel/submodule:
+-- 1) PUT + BREAK + COLLECT
+-- 2) MOVEMENT
+-- Semua penanda struktur di bawah ini adalah komentar saja.
 --==================================================
 
 return function(Hub)
 
     Hub.RegisterTab("MODUL FUNGSI UTAMA", function(page)
+ 
+        --==================================================
+        -- MAIN HUB TAB / ROOT CONTAINER
+        -- Ini adalah satu-satunya Hub.RegisterTab pada file ini.
+        -- Panel PNB dan Movement di bawahnya bukan Hub tab terpisah.
+        --==================================================
 
         --==================================================
-        -- [A] CONFIGURATION & STATE
+        -- [01] SHARED CONFIGURATION & STATE (PNB + MOVEMENT)
         --==================================================
 
         local Players = game:GetService("Players")
@@ -75,7 +83,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [B] UI HELPERS
+        -- [02] SHARED UI HELPERS
         --==================================================
 
         local function create(className, properties, parent)
@@ -158,7 +166,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [C] MAIN SUBMENU UI
+        -- [03] SUBMODULE 1: PUT + BREAK + COLLECT | UI
         -- UI saja yang diatur ulang. Referensi tombol dan TextBox
         -- tetap dipakai oleh event serta logic automation di bawah.
         --==================================================
@@ -335,7 +343,11 @@ return function(Hub)
         end))
 
         --==================================================
-        -- [D] TARGET FIXED: TILE 7, 8, 9
+        --==================================================
+        -- SUBMODULE 1: PUT + BREAK + COLLECT
+        -- UI panel PNB + seluruh logic farming sampai cleanup [14].
+        --==================================================
+        -- [04] SUBMODULE 1: PUT + BREAK + COLLECT | TARGET TILE + POPUP UI
         --==================================================
 
         local function closePopup()
@@ -404,7 +416,7 @@ return function(Hub)
         track(tileButton.Activated:Connect(openTilePopup))
 
         --==================================================
-        -- [E] APB V4 DISCOVERY (SAME WORKING SCAN LOGIC)
+        -- [05] SUBMODULE 1: PUT + BREAK + COLLECT | DISCOVERY
         --==================================================
 
         local getconsts = (debug and debug.getconstants) or getconstants
@@ -568,7 +580,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [F] INVENTORY / WORLD HELPERS
+        -- [06] SUBMODULE 1: PUT + BREAK + COLLECT | INVENTORY / WORLD HELPERS
         --==================================================
 
         local function selectedId()
@@ -615,7 +627,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [G] BUILD PLAN
+        -- [07] SUBMODULE 1: PUT + BREAK + COLLECT | BUILD PLAN
         --==================================================
 
         local function buildPlan()
@@ -643,7 +655,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [H] PUT
+        -- [08] SUBMODULE 1: PUT + BREAK + COLLECT | PUT LOGIC
         --==================================================
 
         local function putOne(x, y, id)
@@ -706,7 +718,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [I] BREAK
+        -- [09] SUBMODULE 1: PUT + BREAK + COLLECT | BREAK LOGIC
         --==================================================
 
         local function breakOne(x, y, startDelayMs, hitDelayMs)
@@ -790,7 +802,7 @@ return function(Hub)
         end
 
         --==================================================
-        -- [J] AUTO COLLECT | HANYA TILE 7, 8, 9
+        -- [10] SUBMODULE 1: PUT + BREAK + COLLECT | AUTO COLLECT
         -- Mekanisme remote dan update drop mengikuti uhuy.lua.
         --==================================================
 
@@ -1091,7 +1103,7 @@ end
         end
 
         --==================================================
-        -- [K] DELAY VALIDATION
+        -- [11] SUBMODULE 1: PUT + BREAK + COLLECT | DELAY VALIDATION
         --==================================================
 
         local function readDelay(box, minimum, maximum)
@@ -1106,7 +1118,7 @@ end
         end
 
         --==================================================
-        -- [L] BUTTON EVENTS + MAIN LOOP
+        -- [12] SUBMODULE 1: PUT + BREAK + COLLECT | BUTTON EVENTS
         --==================================================
 
         track(scanButton.Activated:Connect(function()
@@ -1185,7 +1197,7 @@ end
         end))
 
         --==================================================
-        -- [L1] PNB MAIN AUTOMATION FUNCTION
+        -- [13] SUBMODULE 1: PUT + BREAK + COLLECT | MAIN AUTOMATION FUNCTION
         -- Pemanggilan tunggal: PNB["PNB-UNTIL INVENTORY EMPTY"](...)
         -- Isi dan urutan proses farming dipertahankan.
         --==================================================
@@ -1382,7 +1394,7 @@ end
         end)
 
         --==================================================
-        -- [N] CLEANUP
+        -- [14] SUBMODULE 1: PUT + BREAK + COLLECT | CLEANUP
         --==================================================
 
         local function cleanup()
@@ -1409,7 +1421,11 @@ end
 
 
         --==================================================
-        -- [O] MOVEMENT CONTROLLER
+        --==================================================
+        -- SUBMODULE 2: MOVEMENT
+        -- Logic scan/state/hook/input, UI panel, reconnect, watchdog.
+        --==================================================
+        -- [15] SUBMODULE 2: MOVEMENT | CONTROLLER
         -- Diintegrasikan sebagai submenu kedua setelah PUT + BREAK + COLLECT.
         -- Logic scan, state reader, hook, virtual input, reconnect, dan watchdog
         -- mengikuti script standalone MOVEMENT yang diberikan.
@@ -1769,6 +1785,7 @@ end
             end
         end
 
+        -- [15A] MOVEMENT | VIRTUAL BUTTON UI HELPER
         local function moveMakeButton(parent, key, label, xScale)
             local button = create("TextButton", {
                 Name = "GB_" .. key,
@@ -1796,6 +1813,7 @@ end
             return button
         end
 
+        -- [15B] MOVEMENT | EXPAND/COLLAPSE PANEL + UI LAYOUT
         -- Header MOVEMENT adalah expand/collapse baris kedua pada halaman ini.
         local moveToggle = makeButton(
             "MOVEMENT - AUTO RECONNECT  ▼", 36, page, Theme.PanelDark
@@ -1878,6 +1896,7 @@ end
         moveStop.Position = UDim2.new(0.62, 6, 0, 0)
         moveStop.TextSize = 10
 
+        -- [15C] MOVEMENT | UI EVENTS + INPUT EVENTS
         moveTrack(moveToggle.Activated:Connect(function()
             movePanel.Visible = not movePanel.Visible
             moveToggle.Text = movePanel.Visible
@@ -1925,6 +1944,7 @@ end
             end))
         end
 
+        -- [15D] MOVEMENT | CLEANUP / RESTORE HOOK
         moveCleanup = function()
             if not moveRunning then return end
             moveRunning = false
@@ -1946,6 +1966,7 @@ end
 
         moveENV.GB_MOVEMENT_STOP = moveCleanup
 
+        -- [15E] MOVEMENT | INITIAL SCAN + WATCHDOG
         moveSetStatus("Controller dibuat; mulai scan dari nol...")
         moveLog("MEMULAI SCAN DARI NOL")
         moveLog("ACCOUNT:", LocalPlayer and LocalPlayer.Name or "tidak tersedia")
