@@ -867,15 +867,13 @@ return function(Hub)
                 return false, "UID masih dalam cooldown gagal"
             end
 
-            local amount = drop.n
-            if drop.id ~= 112 and refs.Inv then
-                local roomOk, room = pcall(function() return refs.Inv:room(drop.id) end)
-                if roomOk and type(room) == "number" then amount = math.min(amount, room) end
-            end
-            if amount <= 0 then
-                DropFailUntil[drop.uid] = now + 1
-                return false, "inventory penuh"
-            end
+-- LANGSUNG AMBIL SESUAI JUMLAH DROP.
+-- Tidak melakukan pengecekan kapasitas inventory.
+local amount = tonumber(drop.n) or 0
+
+if amount <= 0 then
+    return false, "drop kosong"
+end
 
             local beforeN = tonumber(drop.n) or 0
             drop.taking = true
