@@ -36,6 +36,7 @@ return function(Hub)
 
         local running = false
         local destroyed = false
+        local moveCleanup -- diisi oleh submenu MOVEMENT di bagian bawah.
         local confirmedId = nil
 
         local refs = {
@@ -1391,6 +1392,10 @@ end
             running = false
             closePopup()
 
+            if moveCleanup then
+                pcall(moveCleanup)
+            end
+
             for _, connection in ipairs(connections) do
                 pcall(function()
                     connection:Disconnect()
@@ -1402,6 +1407,580 @@ end
         Hub.RegisterCleanup(cleanup)
         print("[APB+COLLECT] PUT + BREAK + COLLECT submenu loaded.")
 
+
+        --==================================================
+        -- [O] MOVEMENT CONTROLLER
+        -- Diintegrasikan sebagai submenu kedua setelah PUT + BREAK + COLLECT.
+        -- Logic scan, state reader, hook, virtual input, reconnect, dan watchdog
+        -- mengikuti script standalone MOVEMENT yang diberikan.
+        --==================================================
+
+        local moveENV = (type(getgenv) == "function" and getgenv()) or _G
+        if type(moveENV.GB_MOVEMENT_STOP) == "function" then
+            pcall(moveENV.GB_MOVEMENT_STOP)
+        end
+
+        local UIS = game:GetService("UserInputService")
+        local moveRunning = true
+        local moveScanning = false
+        local moveConnected = false
+        local moveScanCount = 0
+        local moveLastError = "Belum melakukan scan"
+
+        local moveRefs = {
+            player = LocalPlayer,
+            world = nil,
+            stateFn = nil,
+            state = nil,
+            movement = nil,
+            originalIsDown = nil,
+            wrapper = nil,
+            keys = nil,
+            source = "belum ditemukan",
+        }
+
+        local moveInput = {
+            left = false,
+            right = false,
+            jump = false,
+            down = false,
+        }
+
+        local moveButtons = {}
+        local moveHeld = { left = {}, right = {}, jump = {}, down = {} }
+        local moveConnections = {}
+        local moveStatusLabel
+
+        local function moveTrack(connection)
+            table.insert(moveConnections, connection)
+            return connection
+        end
+
+        local function moveLog(...)
+            print("[GB AUTO MOVEMENT]", ...)
+        end
+
+        local function moveSetStatus(message)
+            moveLastError = tostring(message or "-")
+            if moveStatusLabel and moveStatusLabel.Parent then
+                local player = moveRefs.player or Players.LocalPlayer
+                local account = player and player.Name or "belum tersedia"
+                local worldText = moveRefs.world
+                    and (tostring(moveRefs.world.w) .. "x" .. tostring(moveRefs.world.h))
+                    or "belum"
+                local stateText = "belum"
+                if moveRefs.state then
+                    stateText = string.format(
+                        "X %.2f | Y %.2f | VX %.2f | VY %.2f",
+                        moveRefs.state.x or 0,
+                        moveRefs.state.y or 0,
+                        moveRefs.state.vx or 0,
+                        moveRefs.state.vy or 0
+                    )
+                end
+                moveStatusLabel.Text = string.format(
+                    "AKUN: %s\nWORLD: %s | STATE: %s\nMOVEMENT: %s\nSCAN: %d | %s",
+                    tostring(account),
+                    tostring(worldText),
+                    tostring(stateText),
+                    moveConnected and "TERHUBUNG" or "MENCARI / TERPUTUS",
+                    moveScanCount,
+                    moveLastError
+                )
+            end
+        end
+
+        local function moveSafeRaw(t, key)
+            if type(t) ~= "table" then return nil end
+            local ok, value = pcall(rawget, t, key)
+            if ok then return value end
+            return nil
+        end
+
+        local function moveReadPlayerState(fn)
+            if type(fn) ~= "function" then return nil end
+            local ok, value = pcall(fn)
+            if not ok or type(value) ~= "table" then return nil end
+            if type(value.x) ~= "number" or type(value.y) ~= "number" then return nil end
+            if value.facing == nil or value.vx == nil then return nil end
+            if value.active == false then return nil end
+            return value
+        end
+
+        local function moveValidWorld(t)
+            return type(t) == "table"
+                and type(moveSafeRaw(t, "fg")) == "table"
+                and type(moveSafeRaw(t, "bg")) == "table"
+                and type(moveSafeRaw(t, "w")) == "number"
+                and type(moveSafeRaw(t, "h")) == "number"
+                and moveSafeRaw(t, "spawn") ~= nil
+        end
+
+        local function moveValidKeys(keys)
+            if type(keys) ~= "table" then return false end
+            local jump = moveSafeRaw(keys, 2)
+            local left = moveSafeRaw(keys, 3)
+            local right = moveSafeRaw(keys, 4)
+            local down = moveSafeRaw(keys, 5)
+            return type(jump) == "table" and jump[1] == "keyJump"
+                and type(left) == "table" and left[1] == "keyLeft"
+                and type(right) == "table" and right[1] == "keyRight"
+                and type(down) == "table" and down[1] == "keyDown"
+        end
+
+        local function moveValidMovementTable(t)
+            if type(t) ~= "table" then return false end
+            local isDown = moveSafeRaw(t, "isDown")
+            local spaceJumps = moveSafeRaw(t, "spaceJumps")
+            local keys = moveSafeRaw(t, "KEYS")
+            return type(isDown) == "function"
+                and type(spaceJumps) == "function"
+                and moveValidKeys(keys)
+        end
+
+        local function moveGetGC()
+            if type(getgc) ~= "function" then
+                return nil, "Executor tidak menyediakan getgc"
+            end
+            local ok, objects = pcall(getgc, true)
+            if not ok or type(objects) ~= "table" then
+                return nil, "getgc(true) gagal: " .. tostring(objects)
+            end
+            return objects
+        end
+
+        -- Scan ulang dari awal: world, player state, dan movement table.
+        local function moveScanFromZero()
+            moveScanCount += 1
+            local objects, gcError = moveGetGC()
+            if not objects then return false, gcError end
+
+            local foundWorld, foundStateFn, foundState, foundMovement
+
+            for _, object in ipairs(objects) do
+                if type(object) == "table" then
+                    if not foundWorld and moveValidWorld(object) then
+                        foundWorld = object
+                    end
+
+                    if not foundStateFn then
+                        local candidateState = moveSafeRaw(object, "state")
+                        local stateValue = moveReadPlayerState(candidateState)
+                        if stateValue then
+                            foundStateFn = candidateState
+                            foundState = stateValue
+                        end
+                    end
+
+                    if not foundMovement and moveValidMovementTable(object) then
+                        foundMovement = object
+                    end
+
+                    if foundWorld and foundStateFn and foundMovement then
+                        break
+                    end
+                end
+            end
+
+            if foundWorld then moveRefs.world = foundWorld end
+            if foundStateFn then
+                moveRefs.stateFn = foundStateFn
+                moveRefs.state = foundState
+            end
+
+            if foundMovement then
+                moveRefs.movement = foundMovement
+                moveRefs.originalIsDown = moveSafeRaw(foundMovement, "isDown")
+                moveRefs.keys = moveSafeRaw(foundMovement, "KEYS")
+                moveRefs.source = "DIRECT TABLE (isDown + spaceJumps + KEYS)"
+            end
+
+            if not foundWorld then
+                moveLog("WORLD BELUM DITEMUKAN")
+            else
+                moveLog("WORLD OK", foundWorld.w, foundWorld.h)
+            end
+
+            if not foundStateFn then
+                moveLog("PLAYER STATE BELUM DITEMUKAN")
+            else
+                moveLog("PLAYER STATE OK", foundState.x, foundState.y, foundState.vx)
+            end
+
+            if not foundMovement then
+                moveLog("MOVEMENT TABLE BELUM DITEMUKAN PADA SCAN INI")
+            else
+                moveLog("MOVEMENT SOURCE:", moveRefs.source)
+                moveLog("isDown:", tostring(moveSafeRaw(foundMovement, "isDown")))
+                moveLog("spaceJumps:", tostring(moveSafeRaw(foundMovement, "spaceJumps")))
+                moveLog("KEYS:", tostring(moveRefs.keys))
+            end
+
+            return foundWorld ~= nil and foundStateFn ~= nil and foundMovement ~= nil,
+                "world=" .. tostring(foundWorld ~= nil)
+                .. ", state=" .. tostring(foundStateFn ~= nil)
+                .. ", movement=" .. tostring(foundMovement ~= nil)
+        end
+
+        local function moveReleaseAll()
+            for key in pairs(moveInput) do
+                moveInput[key] = false
+                moveHeld[key] = {}
+                local button = moveButtons[key]
+                if button and button.Parent then
+                    button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+                end
+            end
+        end
+
+        local function moveAnyVirtualInput()
+            return moveInput.left or moveInput.right
+                or moveInput.jump or moveInput.down
+        end
+
+        local function moveBuildWrapper(original)
+            return function(saved, key, ...)
+                -- Fungsi asli selalu dipanggil agar keyboard fisik tetap bekerja.
+                local physical = false
+                if type(original) == "function" then
+                    local ok, result = pcall(original, saved, key, ...)
+                    if ok then physical = result end
+                end
+
+                -- Input virtual digabung dengan input fisik, bukan menggantikannya.
+                if key == "keyLeft" then
+                    return (physical == true) or moveInput.left
+                elseif key == "keyRight" then
+                    return (physical == true) or moveInput.right
+                elseif key == "keyJump" then
+                    return (physical == true) or moveInput.jump
+                elseif key == "keyDown" then
+                    return (physical == true) or moveInput.down
+                end
+
+                return physical
+            end
+        end
+
+        local function moveUnhookOld()
+            local module = moveRefs.movement
+            local original = moveRefs.originalIsDown
+            local wrapper = moveRefs.wrapper
+            if module and original and wrapper
+                and moveSafeRaw(module, "isDown") == wrapper then
+                pcall(function() module.isDown = original end)
+                moveLog("HOOK LAMA DIKEMBALIKAN KE FUNGSI ASLI")
+            end
+            moveRefs.wrapper = nil
+            moveRefs.originalIsDown = nil
+            moveConnected = false
+        end
+
+        local function moveInstallHook()
+            local module = moveRefs.movement
+            if not moveValidMovementTable(module) then
+                return false, "Movement table tidak valid"
+            end
+
+            local current = moveSafeRaw(module, "isDown")
+            if moveRefs.wrapper and current == moveRefs.wrapper then
+                moveConnected = true
+                return true, "Hook masih aktif"
+            end
+
+            local original = current
+            if type(original) ~= "function" then
+                return false, "isDown bukan function"
+            end
+
+            local wrapper = moveBuildWrapper(original)
+            local ok, err = pcall(function()
+                module.isDown = wrapper
+            end)
+            if not ok or moveSafeRaw(module, "isDown") ~= wrapper then
+                return false, "Gagal memasang hook: " .. tostring(err)
+            end
+
+            moveRefs.originalIsDown = original
+            moveRefs.wrapper = wrapper
+            moveConnected = true
+            moveLog("HOOK MOVEMENT TERPASANG")
+            return true, "isDown berhasil di-hook"
+        end
+
+        local function moveRefreshState()
+            if moveRefs.stateFn then
+                local value = moveReadPlayerState(moveRefs.stateFn)
+                if value then
+                    moveRefs.state = value
+                    return true
+                end
+            end
+            return false
+        end
+
+        local function moveConnectCycle()
+            if moveScanning or not moveRunning then return end
+            moveScanning = true
+            moveSetStatus("Scan dimulai dari objek game yang aktif...")
+
+            local success = false
+            local message = "Belum ditemukan"
+            for attempt = 1, 30 do
+                if not moveRunning then break end
+                local ok, result = moveScanFromZero()
+                message = result
+                if ok then
+                    local hookOK, hookMessage = moveInstallHook()
+                    if hookOK then
+                        success = true
+                        message = hookMessage
+                        break
+                    end
+                    message = hookMessage
+                end
+                moveSetStatus(
+                    "Menunggu komponen game... percobaan "
+                    .. attempt .. "/30 | " .. message
+                )
+                task.wait(0.5)
+            end
+
+            moveScanning = false
+            if success then
+                moveConnected = true
+                moveLog("SEMUA KOMPONEN SIAP")
+                moveSetStatus("CONNECTED - input fisik + virtual aktif")
+            else
+                moveConnected = false
+                moveSetStatus("Belum tersambung: " .. tostring(message))
+                warn("[GB AUTO MOVEMENT] Scan belum berhasil: " .. tostring(message))
+            end
+        end
+
+        local function moveSetInput(key, value)
+            if not moveRunning then return end
+            moveInput[key] = value == true
+            local button = moveButtons[key]
+            if button and button.Parent then
+                button.BackgroundColor3 = moveInput[key]
+                    and Color3.fromRGB(35, 135, 90)
+                    or Color3.fromRGB(45, 45, 55)
+            end
+        end
+
+        local function moveMakeButton(parent, key, label, xScale)
+            local button = create("TextButton", {
+                Name = "GB_" .. key,
+                Size = UDim2.new(0.24, -5, 0, 48),
+                Position = UDim2.new(xScale, 0, 0, 0),
+                BackgroundColor3 = Color3.fromRGB(45, 45, 55),
+                BorderSizePixel = 0,
+                Text = label,
+                TextColor3 = Theme.White,
+                TextSize = 12,
+                Font = Enum.Font.GothamBold,
+                AutoButtonColor = false,
+                Active = true,
+            }, parent)
+            corner(button, 8)
+            moveButtons[key] = button
+
+            moveTrack(button.InputBegan:Connect(function(obj)
+                if obj.UserInputType == Enum.UserInputType.Touch
+                    or obj.UserInputType == Enum.UserInputType.MouseButton1 then
+                    moveHeld[key][obj] = true
+                    moveSetInput(key, true)
+                end
+            end))
+            return button
+        end
+
+        -- Header MOVEMENT adalah expand/collapse baris kedua pada halaman ini.
+        local moveToggle = makeButton(
+            "MOVEMENT - AUTO RECONNECT  ▼", 36, page, Theme.PanelDark
+        )
+        moveToggle.Name = "MovementExpandToggle"
+        moveToggle.LayoutOrder = 3
+        moveToggle.TextColor3 = Theme.Text
+        moveToggle.TextSize = 11
+
+        local movePanel = create("Frame", {
+            Name = "MovementControllerPanel",
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = Theme.Panel,
+            BorderSizePixel = 0,
+            Visible = false,
+            LayoutOrder = 4,
+        }, page)
+        corner(movePanel, 8)
+
+        create("UIPadding", {
+            PaddingTop = UDim.new(0, 8),
+            PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+        }, movePanel)
+
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, movePanel)
+
+        moveStatusLabel = create("TextLabel", {
+            Name = "MovementStatus",
+            Size = UDim2.new(1, 0, 0, 78),
+            BackgroundColor3 = Theme.Background,
+            BorderSizePixel = 0,
+            TextColor3 = Theme.Text,
+            TextSize = 10,
+            Font = Enum.Font.Code,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            LayoutOrder = 1,
+        }, movePanel)
+        corner(moveStatusLabel, 6)
+
+        local moveButtonRow = create("Frame", {
+            Name = "MovementInputButtons",
+            Size = UDim2.new(1, 0, 0, 48),
+            BackgroundTransparency = 1,
+            LayoutOrder = 2,
+        }, movePanel)
+
+        moveMakeButton(moveButtonRow, "left", "KIRI", 0)
+        moveMakeButton(moveButtonRow, "right", "KANAN", 0.25)
+        moveMakeButton(moveButtonRow, "jump", "JUMP", 0.50)
+        moveMakeButton(moveButtonRow, "down", "TURUN", 0.75)
+
+        local moveActionRow = create("Frame", {
+            Name = "MovementActions",
+            Size = UDim2.new(1, 0, 0, 32),
+            BackgroundTransparency = 1,
+            LayoutOrder = 3,
+        }, movePanel)
+
+        local moveReconnect = makeButton(
+            "SCAN / CONNECT ULANG", 30, moveActionRow, Theme.Accent
+        )
+        moveReconnect.Name = "MovementReconnect"
+        moveReconnect.Size = UDim2.new(0.62, -6, 0, 30)
+        moveReconnect.Position = UDim2.fromOffset(0, 0)
+        moveReconnect.TextSize = 10
+
+        local moveStop = makeButton(
+            "STOP", 30, moveActionRow, Theme.Red
+        )
+        moveStop.Name = "MovementStop"
+        moveStop.Size = UDim2.new(0.38, -6, 0, 30)
+        moveStop.Position = UDim2.new(0.62, 6, 0, 0)
+        moveStop.TextSize = 10
+
+        moveTrack(moveToggle.Activated:Connect(function()
+            movePanel.Visible = not movePanel.Visible
+            moveToggle.Text = movePanel.Visible
+                and "MOVEMENT - AUTO RECONNECT  ▲"
+                or "MOVEMENT - AUTO RECONNECT  ▼"
+        end))
+
+        moveTrack(moveReconnect.Activated:Connect(function()
+            if moveConnected then
+                moveUnhookOld()
+            end
+            moveReleaseAll()
+            task.spawn(moveConnectCycle)
+        end))
+
+        moveTrack(moveStop.Activated:Connect(function()
+            if type(moveENV.GB_MOVEMENT_STOP) == "function" then
+                moveENV.GB_MOVEMENT_STOP()
+            end
+        end))
+
+        -- Lepas input virtual saat jari dilepas di luar tombol.
+        moveTrack(UIS.InputEnded:Connect(function(obj)
+            for key, map in pairs(moveHeld) do
+                if map[obj] then
+                    map[obj] = nil
+                    moveSetInput(key, next(map) ~= nil)
+                end
+            end
+        end))
+
+        pcall(function()
+            moveTrack(UIS.WindowFocusReleased:Connect(moveReleaseAll))
+        end)
+
+        if LocalPlayer then
+            moveTrack(LocalPlayer.CharacterAdded:Connect(function()
+                moveReleaseAll()
+                task.delay(1, function()
+                    if moveRunning then task.spawn(moveConnectCycle) end
+                end)
+            end))
+            moveTrack(LocalPlayer.CharacterRemoving:Connect(function()
+                moveReleaseAll()
+            end))
+        end
+
+        moveCleanup = function()
+            if not moveRunning then return end
+            moveRunning = false
+            moveReleaseAll()
+            moveUnhookOld()
+
+            for _, connection in ipairs(moveConnections) do
+                pcall(function()
+                    connection:Disconnect()
+                end)
+            end
+            table.clear(moveConnections)
+
+            if moveENV.GB_MOVEMENT_STOP == moveCleanup then
+                moveENV.GB_MOVEMENT_STOP = nil
+            end
+            moveLog("CONTROLLER DIHENTIKAN DAN HOOK DIPULIHKAN")
+        end
+
+        moveENV.GB_MOVEMENT_STOP = moveCleanup
+
+        moveSetStatus("Controller dibuat; mulai scan dari nol...")
+        moveLog("MEMULAI SCAN DARI NOL")
+        moveLog("ACCOUNT:", LocalPlayer and LocalPlayer.Name or "tidak tersedia")
+        moveLog("USER ID:", LocalPlayer and LocalPlayer.UserId or "tidak tersedia")
+        task.spawn(moveConnectCycle)
+
+        -- Watchdog: sambungkan ulang bila hook/module berubah saat world reload.
+        task.spawn(function()
+            while moveRunning do
+                task.wait(1.25)
+                if not moveRunning then break end
+
+                local module = moveRefs.movement
+                local wrapper = moveRefs.wrapper
+                local hookStillInstalled = module and wrapper
+                    and moveSafeRaw(module, "isDown") == wrapper
+
+                if moveConnected and not hookStillInstalled then
+                    moveLog("HOOK / MODULE BERUBAH - INPUT DILEPAS, SCAN ULANG")
+                    moveReleaseAll()
+                    moveRefs.movement = nil
+                    moveRefs.originalIsDown = nil
+                    moveRefs.wrapper = nil
+                    moveConnected = false
+                    task.spawn(moveConnectCycle)
+                elseif not moveConnected and not moveScanning then
+                    task.spawn(moveConnectCycle)
+                elseif moveConnected then
+                    moveRefreshState()
+                    moveSetStatus("Terhubung; input fisik + virtual aktif")
+                end
+            end
+        end)
+
+        print("[GB AUTO MOVEMENT] MOVEMENT submenu loaded.")
     end)
 
 end -- return function(Hub)
