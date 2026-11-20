@@ -1427,7 +1427,7 @@ end
         --==================================================
         -- [15] SUBMODULE 2: MOVEMENT | CONTROLLER
         -- Diintegrasikan sebagai submenu kedua setelah PUT + BREAK + COLLECT.
-        -- Logic scan, state reader, hook, virtual input, reconnect, dan watchdog
+        -- Logic scan, state reader, hook, virtual input, dan reconnect manual
         -- mengikuti script standalone MOVEMENT yang diberikan.
         --==================================================
 
@@ -1724,17 +1724,6 @@ end
             return true, "isDown berhasil di-hook"
         end
 
-        local function moveRefreshState()
-            if moveRefs.stateFn then
-                local value = moveReadPlayerState(moveRefs.stateFn)
-                if value then
-                    moveRefs.state = value
-                    return true
-                end
-            end
-            return false
-        end
-
         local function moveConnectCycle()
             if moveScanning or not moveRunning then return end
             moveScanning = true
@@ -1816,7 +1805,7 @@ end
         -- [15B] MOVEMENT | EXPAND/COLLAPSE PANEL + UI LAYOUT
         -- Header MOVEMENT adalah expand/collapse baris kedua pada halaman ini.
         local moveToggle = makeButton(
-            "MOVEMENT - AUTO RECONNECT  ▼", 36, page, Theme.PanelDark
+            "MOVEMENT - MANUAL SCAN  ▼", 36, page, Theme.PanelDark
         )
         moveToggle.Name = "MovementExpandToggle"
         moveToggle.LayoutOrder = 3
@@ -1884,24 +1873,16 @@ end
             "SCAN / CONNECT ULANG", 30, moveActionRow, Theme.Accent
         )
         moveReconnect.Name = "MovementReconnect"
-        moveReconnect.Size = UDim2.new(0.62, -6, 0, 30)
+        moveReconnect.Size = UDim2.new(1, 0, 0, 30)
         moveReconnect.Position = UDim2.fromOffset(0, 0)
         moveReconnect.TextSize = 10
-
-        local moveStop = makeButton(
-            "STOP", 30, moveActionRow, Theme.Red
-        )
-        moveStop.Name = "MovementStop"
-        moveStop.Size = UDim2.new(0.38, -6, 0, 30)
-        moveStop.Position = UDim2.new(0.62, 6, 0, 0)
-        moveStop.TextSize = 10
 
         -- [15C] MOVEMENT | UI EVENTS + INPUT EVENTS
         moveTrack(moveToggle.Activated:Connect(function()
             movePanel.Visible = not movePanel.Visible
             moveToggle.Text = movePanel.Visible
-                and "MOVEMENT - AUTO RECONNECT  ▲"
-                or "MOVEMENT - AUTO RECONNECT  ▼"
+                and "MOVEMENT - MANUAL SCAN  ▲"
+                or "MOVEMENT - MANUAL SCAN  ▼"
         end))
 
         moveTrack(moveReconnect.Activated:Connect(function()
@@ -1910,12 +1891,6 @@ end
             end
             moveReleaseAll()
             task.spawn(moveConnectCycle)
-        end))
-
-        moveTrack(moveStop.Activated:Connect(function()
-            if type(moveENV.GB_MOVEMENT_STOP) == "function" then
-                moveENV.GB_MOVEMENT_STOP()
-            end
         end))
 
         -- Lepas input virtual saat jari dilepas di luar tombol.
@@ -1966,40 +1941,14 @@ end
 
         moveENV.GB_MOVEMENT_STOP = moveCleanup
 
-        -- [15E] MOVEMENT | INITIAL SCAN + WATCHDOG
+        -- [15E] MOVEMENT | INITIAL SCAN
+        -- Scan otomatis hanya sekali saat modul dimuat.
+        -- Jika hook terputus setelahnya, pengguna menekan SCAN / CONNECT ULANG.
         moveSetStatus("Controller dibuat; mulai scan dari nol...")
         moveLog("MEMULAI SCAN DARI NOL")
         moveLog("ACCOUNT:", LocalPlayer and LocalPlayer.Name or "tidak tersedia")
         moveLog("USER ID:", LocalPlayer and LocalPlayer.UserId or "tidak tersedia")
         task.spawn(moveConnectCycle)
-
-        -- Watchdog: sambungkan ulang bila hook/module berubah saat world reload.
-        task.spawn(function()
-            while moveRunning do
-                task.wait(1.25)
-                if not moveRunning then break end
-
-                local module = moveRefs.movement
-                local wrapper = moveRefs.wrapper
-                local hookStillInstalled = module and wrapper
-                    and moveSafeRaw(module, "isDown") == wrapper
-
-                if moveConnected and not hookStillInstalled then
-                    moveLog("HOOK / MODULE BERUBAH - INPUT DILEPAS, SCAN ULANG")
-                    moveReleaseAll()
-                    moveRefs.movement = nil
-                    moveRefs.originalIsDown = nil
-                    moveRefs.wrapper = nil
-                    moveConnected = false
-                    task.spawn(moveConnectCycle)
-                elseif not moveConnected and not moveScanning then
-                    task.spawn(moveConnectCycle)
-                elseif moveConnected then
-                    moveRefreshState()
-                    moveSetStatus("Terhubung; input fisik + virtual aktif")
-                end
-            end
-        end)
 
         print("[GB AUTO MOVEMENT] MOVEMENT submenu loaded.")
     end)
