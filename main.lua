@@ -477,7 +477,7 @@ end
 local HttpService = game:GetService("HttpService")
 
 local MODULES_API =
-    "https://api.github.com/repos/rakaaryo23/GrowBlox-Script/contents/modules?ref=main"
+    "https://api.github.com/repos/rakaaryo23/BakwanMalang/contents/modules?ref=main"
 
 local function LoadOneModule(fileName, downloadUrl)
 
