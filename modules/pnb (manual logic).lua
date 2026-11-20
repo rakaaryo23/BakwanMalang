@@ -6,7 +6,7 @@
 
 return function(Hub)
 
-    Hub.RegisterTab("PUT + BREAK + COLLECT", function(page)
+    Hub.RegisterTab("MODUL FUNGSI UTAMA", function(page)
 
         --==================================================
         -- [A] CONFIGURATION & STATE
@@ -169,7 +169,7 @@ return function(Hub)
 
         -- Tombol judul menjadi satu-satunya kontrol buka/tutup.
         local mainToggle = makeButton(
-            "PUT AND BREAK - INVENTORY HABIS  ▼", 36, page, Theme.PanelDark
+            "PUT + BREAK + COLLECT - SAMPAI INVEN HABIS  ▼", 36, page, Theme.PanelDark
         )
         mainToggle.TextColor3 = Theme.Text
         mainToggle.LayoutOrder = 1
