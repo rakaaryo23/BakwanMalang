@@ -1,5 +1,5 @@
 
-local URL = "https://raw.githubusercontent.com/rakaaryo23/GrowBlox-Script/main/main.lua"
+local URL = "https://raw.githubusercontent.com/rakaaryo23/BakwanMalang/main/main.lua"
 
 local success, source = pcall(function()
     return game:HttpGet(URL)
