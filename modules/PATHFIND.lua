@@ -308,24 +308,40 @@ return function(Hub)
             return math.floor(state.y - 0.475)
         end
 
-        local function getRowBounds(rowY)
+        -- Mengambil semua tile kosong pada satu baris.
+        -- Tile kosong harus memenuhi FG=0 dan BG=0.
+        local function getEmptyTiles(rowY)
             local world = refs.world
-            if not world then return nil end
-            local row = world.fg and world.fg[rowY]
-            if type(row) ~= "table" then return nil end
+            if not world then return nil, "World belum tersedia" end
 
-            local minX, maxX, count
-            count = 0
+            local fgRow = world.fg and world.fg[rowY]
+            local bgRow = world.bg and world.bg[rowY]
+            if type(fgRow) ~= "table" or type(bgRow) ~= "table" then
+                return nil, "Data baris Y=" .. tostring(rowY) .. " tidak terbaca"
+            end
+
+            local empty = {}
             for x = 0, world.w - 1 do
-                local id = row[x]
-                if id ~= nil and id ~= 0 then
-                    count += 1
-                    if minX == nil or x < minX then minX = x end
-                    if maxX == nil or x > maxX then maxX = x end
+                if fgRow[x] == 0 and bgRow[x] == 0 then
+                    empty[#empty + 1] = x
                 end
             end
-            if not minX then return nil end
-            return minX, maxX, count
+
+            if #empty == 0 then
+                return nil, "Tidak ada tile kosong FG=0 dan BG=0 pada Y=" .. tostring(rowY)
+            end
+            return empty
+        end
+
+        local function chooseNearestX(candidates, playerX)
+            local bestX, bestDistance
+            for _, x in ipairs(candidates) do
+                local distance = math.abs((x + 0.5) - playerX)
+                if bestDistance == nil or distance < bestDistance then
+                    bestX, bestDistance = x, distance
+                end
+            end
+            return bestX
         end
 
         local function waitStep()
@@ -360,63 +376,148 @@ return function(Hub)
         local function crossOneFarmRow(direction)
             local state = currentState()
             if not state then return false, "PlayerState tidak terbaca" end
-            local rowY = playerTileY(state)
-            local minX, maxX = getRowBounds(rowY)
-            if not minX then
-                return false, "Barisan FG tidak ditemukan pada Y=" .. tostring(rowY)
-            end
+
+            local startRow = playerTileY(state)
+            local scanRow = direction == "UP" and (startRow - 1) or (startRow + 1)
+            local candidates, scanError = getEmptyTiles(scanRow)
+            if not candidates then return false, scanError end
 
             local corridorTileX
             if direction == "UP" then
-                -- Aturan Dirt Farm: perpindahan naik melalui lorong kanan.
-                corridorTileX = maxX + 1
-            else
-                -- Aturan Dirt Farm: perpindahan turun melalui lorong kiri.
-                corridorTileX = minX - 1
-            end
+                -- Naik melalui tile kosong di ujung kiri atau kanan world.
+                local leftEdge, rightEdge = nil, nil
+                for _, x in ipairs(candidates) do
+                    if x == 0 then leftEdge = x end
+                    if x == refs.world.w - 1 then rightEdge = x end
+                end
 
-            if corridorTileX < 0 or corridorTileX >= refs.world.w then
-                return false, "Lorong " .. direction .. " berada di luar batas world"
+                if leftEdge ~= nil and rightEdge ~= nil then
+                    corridorTileX = chooseNearestX({leftEdge, rightEdge}, state.x)
+                else
+                    corridorTileX = leftEdge or rightEdge
+                end
+
+                if corridorTileX == nil then
+                    return false, "Tile kosong di ujung kiri/kanan tidak ditemukan pada Y=" .. tostring(scanRow)
+                end
+            else
+                -- Turun melalui tile kosong terdekat pada baris di bawah player.
+                corridorTileX = chooseNearestX(candidates, state.x)
             end
 
             local corridorCenter = corridorTileX + 0.5
-            setStatus(string.format("MENUJU LORONG %s | ROW %d | X %.1f", direction, rowY, corridorCenter))
+            setStatus(string.format(
+                "SCAN %s | ROW %d | TILE KOSONG X=%d | FG=0 BG=0",
+                direction, scanRow, corridorTileX
+            ))
+
             local reached, moveError = moveHorizontalTo(corridorCenter, 0.16)
             if not reached then return false, moveError end
 
-            local startRow = rowY
-            setStatus("MELINTASI LORONG " .. direction .. " | ROW " .. startRow)
             if direction == "UP" then
-                setInput("jump", true)
+                local inwardKey = corridorTileX == 0 and "right" or "left"
+                setStatus(string.format(
+                    "NAIK DARI X=%d | LOMPAT + GERAK %s",
+                    corridorTileX, string.upper(inwardKey)
+                ))
                 setInput("down", false)
+                setInput(inwardKey == "left" and "right" or "left", false)
+                setInput("jump", true)
+                setInput(inwardKey, true)
             else
+                setStatus(string.format(
+                    "TURUN | MENUNGGU JATUH DARI TILE KOSONG X=%d",
+                    corridorTileX
+                ))
                 setInput("jump", false)
-                setInput("down", true)
+                setInput("left", false)
+                setInput("right", false)
+                setInput("down", false)
             end
 
             local changed = false
+            local startedAt = os.clock()
             while goRunning and not stopRequested do
                 local now = currentState()
                 if not now then
                     releaseAll()
-                    return false, "PlayerState hilang saat melewati lorong"
+                    return false, "PlayerState hilang saat berpindah baris"
                 end
+
                 local nowRow = playerTileY(now)
-                positionLabel.Text = string.format("POSISI: X %.2f | Y %.2f | ROW %d", now.x, now.y, nowRow)
-                if direction == "UP" and nowRow < startRow then
+                positionLabel.Text = string.format(
+                    "POSISI: X %.2f | Y %.2f | ROW %d",
+                    now.x, now.y, nowRow
+                )
+
+                if (direction == "UP" and nowRow < startRow)
+                    or (direction == "DOWN" and nowRow > startRow) then
                     changed = true
                     break
-                elseif direction == "DOWN" and nowRow > startRow then
-                    changed = true
+                end
+
+                if os.clock() - startedAt > 3.5 then
                     break
                 end
                 if not waitStep() then break end
             end
 
             releaseAll()
-            if not changed then return false, "Perpindahan baris tidak terdeteksi" end
-            task.wait(0.08)
+            if not changed then
+                return false, "Perpindahan baris tidak terdeteksi dari Y=" .. tostring(startRow)
+            end
+
+            task.wait(0.12)
+            local after = currentState()
+            if not after then return false, "PlayerState tidak terbaca setelah pindah baris" end
+            setStatus(string.format(
+                "BERHASIL PINDAH BARIS | ROW %d -> %d",
+                startRow, playerTileY(after)
+            ))
             return true
+        end
+
+        -- Setelah X masuk toleransi, tetap verifikasi dan koreksi selama 1.4 detik.
+        local function moveHorizontalStableTo(xGoal, tolerance)
+            tolerance = tolerance or 0.16
+            local stableSince = nil
+            local startedAt = os.clock()
+
+            while goRunning and not stopRequested do
+                local state = currentState()
+                if not state then return false, "PlayerState tidak terbaca" end
+
+                positionLabel.Text = string.format(
+                    "POSISI: X %.2f | Y %.2f", state.x, state.y
+                )
+                local dx = xGoal - state.x
+
+                if math.abs(dx) <= tolerance then
+                    releaseAll()
+                    if not stableSince then stableSince = os.clock() end
+                    if os.clock() - stableSince >= 1.4 then
+                        return true
+                    end
+                else
+                    stableSince = nil
+                    if dx > 0 then
+                        setInput("left", false)
+                        setInput("right", true)
+                    else
+                        setInput("right", false)
+                        setInput("left", true)
+                    end
+                end
+
+                if os.clock() - startedAt > 8 then
+                    return false, "Timeout saat mengunci posisi X akhir"
+                end
+                if not waitStep() then
+                    return false, "GO dihentikan saat verifikasi X akhir"
+                end
+            end
+
+            return false, "GO dihentikan"
         end
 
         local function navigateToLocked()
@@ -450,7 +551,7 @@ return function(Hub)
                         local targetRow = playerTileY(target)
 
                         if currentRow == targetRow then
-                            local moved, moveError = moveHorizontalTo(target.x, tolerance)
+                            local moved, moveError = moveHorizontalStableTo(target.x, tolerance)
                             if not moved then error(moveError) end
 
                             -- Tunggu posisi state mendekati koordinat LOCK, bukan hanya tile yang sama.
@@ -466,7 +567,7 @@ return function(Hub)
                                     return
                                 end
                                 if dx > tolerance then
-                                    local ok, err = moveHorizontalTo(target.x, tolerance)
+                                    local ok, err = moveHorizontalStableTo(target.x, tolerance)
                                     if not ok then error(err) end
                                 end
                                 if not waitStep() then break end
