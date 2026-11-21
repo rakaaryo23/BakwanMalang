@@ -1,19 +1,20 @@
 --==================================================
--- MODULE: SCAN 1 BLOCK ABOVE PLAYER
--- Membaca FG dan BG pada tile tepat 1 block di atas player.
--- Sumber posisi/world mengikuti pola discovery pada main.lua:
+-- MODULE: SCAN FULL ROW ABOVE / BELOW PLAYER
+-- Scan seluruh tile dalam satu baris world (biasanya 100 tile).
+-- Tombol terpisah:
+--   1) SCAN BARIS DI ATAS PLAYER
+--   2) SCAN BARIS DI BAWAH PLAYER
+-- Menampilkan koordinat tile dengan FG=0 dan BG=0.
+--
+-- Referensi mengikuti main.lua:
 --   state() -> {x, y, facing, vx, ...}
 --   world.fg[y][x], world.bg[y][x]
--- Koordinat world menggunakan index 0-based.
+-- Koordinat world 0-based.
 --==================================================
 
 return function(Hub)
-    Hub.RegisterTab("SCAN ABOVE PLAYER", function(page)
-        local Players = game:GetService("Players")
-        local LocalPlayer = Players.LocalPlayer
-
+    Hub.RegisterTab("SCAN BARIS PLAYER", function(page)
         local destroyed = false
-        local live = false
         local refs = {
             world = nil,
             stateFn = nil,
@@ -75,7 +76,7 @@ return function(Hub)
 
         local function makeButton(text, parent, color)
             local button = create("TextButton", {
-                Size = UDim2.new(1, 0, 0, 34),
+                Size = UDim2.new(1, 0, 0, 36),
                 BackgroundColor3 = color or Theme.Accent,
                 BorderSizePixel = 0,
                 Text = text,
@@ -89,7 +90,7 @@ return function(Hub)
         end
 
         local container = create("Frame", {
-            Name = "ScanAbovePlayerPanel",
+            Name = "ScanPlayerRowsPanel",
             Size = UDim2.new(1, 0, 0, 0),
             AutomaticSize = Enum.AutomaticSize.Y,
             BackgroundColor3 = Theme.Panel,
@@ -109,25 +110,65 @@ return function(Hub)
             SortOrder = Enum.SortOrder.LayoutOrder,
         }, container)
 
-        local title = makeLabel("SCAN 1 BLOCK ABOVE PLAYER", 25, container, true)
+        local title = makeLabel("SCAN FULL ROW PLAYER", 25, container, true)
         title.LayoutOrder = 1
 
-        local infoLabel = makeLabel(
-            "Player: menunggu scan\nTile atas: -\nFG ID: - | BG ID: -",
-            68, container
+        local playerLabel = makeLabel(
+            "Player State: menunggu scan\nPlayer Tile: -",
+            42, container
         )
-        infoLabel.LayoutOrder = 2
+        playerLabel.LayoutOrder = 2
 
-        local statusLabel = makeLabel("Status: belum scan", 30, container)
-        statusLabel.TextColor3 = Theme.Muted
-        statusLabel.LayoutOrder = 3
+        local aboveButton = makeButton(
+            "SCAN 100 TILE DI ATAS PLAYER", container, Theme.Accent
+        )
+        aboveButton.LayoutOrder = 3
 
-        local scanButton = makeButton("SCAN ABOVE PLAYER", container, Theme.Accent)
-        scanButton.LayoutOrder = 4
+        local belowButton = makeButton(
+            "SCAN 100 TILE DI BAWAH PLAYER", container, Theme.PanelDark
+        )
+        belowButton.TextColor3 = Theme.Text
+        belowButton.LayoutOrder = 4
 
-        local liveButton = makeButton("LIVE SCAN: OFF", container, Theme.PanelDark)
-        liveButton.TextColor3 = Theme.Text
-        liveButton.LayoutOrder = 5
+        local resultTitle = makeLabel(
+            "HASIL: belum ada scan", 28, container, true
+        )
+        resultTitle.LayoutOrder = 5
+
+        local resultFrame = create("ScrollingFrame", {
+            Name = "EmptyTileCoordinates",
+            Size = UDim2.new(1, 0, 0, 180),
+            BackgroundColor3 = Theme.Background,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 5,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+        }, container)
+        resultFrame.LayoutOrder = 6
+        corner(resultFrame, 6)
+
+        create("UIPadding", {
+            PaddingTop = UDim.new(0, 6),
+            PaddingBottom = UDim.new(0, 6),
+            PaddingLeft = UDim.new(0, 7),
+            PaddingRight = UDim.new(0, 7),
+        }, resultFrame)
+
+        local resultLayout = create("UIListLayout", {
+            Padding = UDim.new(0, 3),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, resultFrame)
+
+        local resultText = makeLabel(
+            "Koordinat tile FG=0 dan BG=0 akan muncul di sini.",
+            40, resultFrame
+        )
+        resultText.AutomaticSize = Enum.AutomaticSize.Y
+        resultText.Size = UDim2.new(1, -4, 0, 0)
+        resultText.TextYAlignment = Enum.TextYAlignment.Top
+        resultText.TextWrapped = true
+        resultText.LayoutOrder = 1
 
         local function validWorld(candidate)
             return type(candidate) == "table"
@@ -191,112 +232,176 @@ return function(Hub)
                     .. tostring(refs.stateFn ~= nil)
             end
 
-            return true, "World dan playerState ditemukan"
+            return true
         end
 
-        local function readTile(layer, x, y)
-            local world = refs.world
-            if not world then return nil end
-
-            local width = tonumber(safeRaw(world, "w"))
-            local height = tonumber(safeRaw(world, "h"))
-            if not width or not height
-                or x < 0 or y < 0 or x >= width or y >= height then
-                return nil
+        local function getPlayerAndWorld()
+            if not refs.world or not refs.stateFn then
+                local ok, message = discoverRefs()
+                if not ok then return nil, nil, nil, nil, message end
             end
 
+            local state = readState(refs.stateFn)
+            if not state then
+                refs.stateFn = nil
+                local ok, message = discoverRefs()
+                if not ok then return nil, nil, nil, nil, message end
+                state = readState(refs.stateFn)
+            end
+
+            if not state then
+                return nil, nil, nil, nil, "Player state tidak terbaca"
+            end
+
+            local world = refs.world
+            local width = tonumber(safeRaw(world, "w"))
+            local height = tonumber(safeRaw(world, "h"))
+            if not width or not height then
+                refs.world = nil
+                return nil, nil, nil, nil, "Ukuran world tidak valid"
+            end
+
+            -- Formula tile player disamakan dengan main.lua.
+            local playerX = math.floor(state.x)
+            local playerY = math.floor(state.y - 0.475)
+
+            playerLabel.Text = string.format(
+                "Player State: X %.3f | Y %.3f\nPlayer Tile: X %d | Y %d | World: %dx%d",
+                state.x, state.y, playerX, playerY, width, height
+            )
+
+            return playerX, playerY, width, height
+        end
+
+        local function getTileValue(layer, x, y)
+            local world = refs.world
             local layerTable = safeRaw(world, layer)
-            local row = type(layerTable) == "table" and safeRaw(layerTable, y)
-            if type(row) ~= "table" then return 0 end
+            if type(layerTable) ~= "table" then return nil end
+
+            local row = safeRaw(layerTable, y)
+            if type(row) ~= "table" then return nil end
 
             local value = safeRaw(row, x)
             if value == nil then return 0 end
             return value
         end
 
-        local function scanAbovePlayer()
-            if not refs.world or not refs.stateFn then
-                local ok, message = discoverRefs()
-                if not ok then
-                    return false, message
+        local function setResults(lines)
+            resultText.Text = table.concat(lines, "\n")
+            resultFrame.CanvasPosition = Vector2.new(0, 0)
+        end
+
+        local function scanFullRow(direction)
+            if destroyed or Hub.IsClosing() then return end
+
+            local playerX, playerY, width, height, errorMessage =
+                getPlayerAndWorld()
+
+            if not playerX then
+                resultTitle.Text = "SCAN GAGAL"
+                setResults({ tostring(errorMessage or "Player/world tidak terbaca") })
+                warn("[SCAN PLAYER ROW]", errorMessage)
+                return
+            end
+
+            -- Satu baris penuh: Y player - 1 untuk atas, Y player + 1 untuk bawah.
+            local targetY = playerY + direction
+            local rowName = direction < 0 and "DI ATAS" or "DI BAWAH"
+
+            if targetY < 0 or targetY >= height then
+                resultTitle.Text = "SCAN GAGAL"
+                setResults({
+                    ("Baris Y=%d berada di luar world (tinggi %d).")
+                        :format(targetY, height)
+                })
+                return
+            end
+
+            local emptyCoordinates = {}
+            local unreadable = {}
+            local checked = 0
+
+            for x = 0, width - 1 do
+                local fg = getTileValue("fg", x, targetY)
+                local bg = getTileValue("bg", x, targetY)
+
+                if fg == nil or bg == nil then
+                    unreadable[#unreadable + 1] = x
+                else
+                    checked += 1
+                    if fg == 0 and bg == 0 then
+                        emptyCoordinates[#emptyCoordinates + 1] = x
+                    end
                 end
             end
 
-            local state = readState(refs.stateFn)
-            if not state then
-                refs.stateFn = nil
-                return false, "Player state tidak terbaca; tekan SCAN lagi"
-            end
-
-            -- Formula tile player sama seperti main.lua:
-            -- X = floor(state.x), Y = floor(state.y - 0.475)
-            local playerX = math.floor(state.x)
-            local playerY = math.floor(state.y - 0.475)
-
-            -- Target adalah tepat satu tile di atas tile player.
-            local targetX = playerX
-            local targetY = playerY - 1
-
-            local fg = readTile("fg", targetX, targetY)
-            local bg = readTile("bg", targetX, targetY)
-
-            if fg == nil or bg == nil then
-                return false, ("Tile (%d,%d) di luar world / tidak terbaca")
-                    :format(targetX, targetY)
-            end
-
-            infoLabel.Text = string.format(
-                "Player State: X %.3f | Y %.3f\n"
-                .. "Player Tile: X %d | Y %d\n"
-                .. "1 Block Above: X %d | Y %d\n"
-                .. "FG ID: %s | BG ID: %s",
-                state.x, state.y,
-                playerX, playerY,
-                targetX, targetY,
-                tostring(fg), tostring(bg)
+            local lines = {}
+            lines[#lines + 1] = string.format(
+                "BARIS %s | Y=%d | DICEK %d/%d TILE",
+                rowName, targetY, checked, width
+            )
+            lines[#lines + 1] = string.format(
+                "TILE KOSONG (FG=0, BG=0): %d",
+                #emptyCoordinates
             )
 
-            statusLabel.Text = "Status: scan berhasil"
-            statusLabel.TextColor3 = Theme.Green
-            return true, string.format(
-                "Tile (%d,%d) | FG=%s | BG=%s",
-                targetX, targetY, tostring(fg), tostring(bg)
+            if #emptyCoordinates > 0 then
+                lines[#lines + 1] = "KOORDINAT (X,Y):"
+                local coordinateParts = {}
+                for _, x in ipairs(emptyCoordinates) do
+                    coordinateParts[#coordinateParts + 1] =
+                        string.format("(%d,%d)", x, targetY)
+                end
+
+                -- Pecah menjadi beberapa baris agar hasil tetap terbaca.
+                for startIndex = 1, #coordinateParts, 8 do
+                    local chunk = {}
+                    for i = startIndex, math.min(startIndex + 7, #coordinateParts) do
+                        chunk[#chunk + 1] = coordinateParts[i]
+                    end
+                    lines[#lines + 1] = table.concat(chunk, "  ")
+                end
+            else
+                lines[#lines + 1] = "Tidak ditemukan tile dengan FG=0 dan BG=0."
+            end
+
+            if #unreadable > 0 then
+                lines[#lines + 1] = "BARIS TIDAK TERBACA PADA X:"
+                local parts = {}
+                for _, x in ipairs(unreadable) do
+                    parts[#parts + 1] = tostring(x)
+                end
+                lines[#lines + 1] = table.concat(parts, ", ")
+            end
+
+            resultTitle.Text = string.format(
+                "HASIL %s | Y=%d | EMPTY %d",
+                rowName, targetY, #emptyCoordinates
+            )
+            resultTitle.TextColor3 =
+                (#emptyCoordinates > 0) and Theme.Green or Theme.Text
+
+            setResults(lines)
+            print(
+                "[SCAN PLAYER ROW]",
+                rowName,
+                "Y=" .. tostring(targetY),
+                "EMPTY=" .. tostring(#emptyCoordinates),
+                table.concat(emptyCoordinates, ",")
             )
         end
 
-        track(scanButton.Activated:Connect(function()
-            local ok, message = scanAbovePlayer()
-            statusLabel.Text = "Status: " .. tostring(message)
-            if not ok then statusLabel.TextColor3 = Theme.Red end
-            print("[SCAN ABOVE PLAYER]", message)
+        track(aboveButton.Activated:Connect(function()
+            scanFullRow(-1)
         end))
 
-        track(liveButton.Activated:Connect(function()
-            live = not live
-            liveButton.Text = live and "LIVE SCAN: ON" or "LIVE SCAN: OFF"
-            liveButton.BackgroundColor3 = live and Theme.Green or Theme.PanelDark
-            liveButton.TextColor3 = live and Theme.White or Theme.Text
-
-            if live then
-                task.spawn(function()
-                    while live and not destroyed
-                        and not Hub.IsClosing()
-                        and page.Parent do
-                        local ok, message = scanAbovePlayer()
-                        if not ok then
-                            statusLabel.Text = "Status: " .. tostring(message)
-                            statusLabel.TextColor3 = Theme.Red
-                        end
-                        task.wait(0.2)
-                    end
-                end)
-            end
+        track(belowButton.Activated:Connect(function()
+            scanFullRow(1)
         end))
 
         local function cleanup()
             if destroyed then return end
             destroyed = true
-            live = false
 
             for _, connection in ipairs(connections) do
                 pcall(function()
@@ -307,6 +412,6 @@ return function(Hub)
         end
 
         Hub.RegisterCleanup(cleanup)
-        print("[SCAN ABOVE PLAYER] Module loaded.")
+        print("[SCAN PLAYER ROW] Module loaded.")
     end)
 end
