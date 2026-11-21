@@ -2575,37 +2575,24 @@ end
 
         --==================================================
         -- [17] SUBMODULE 4: DROP SELECTED INVENTORY
-        -- Menggunakan HUD.onDrop milik game seperti K.lua.
-        -- Tidak memasang hook movement baru; arah dibantu controller MOVEMENT.
+        -- Mengambil item yang sedang dipilih di inventory saat tombol ditekan.
+        -- Tidak melakukan scan daftar item, tidak membuat pilihan tambahan,
+        -- dan hanya memanggil HUD.onDrop satu kali.
         --==================================================
         do
             local dropAlive = true
-            local dropBusy = false
-            local dropHud = nil
-            local dropOnDrop = nil
-            local dropSelected = {}
-            local dropRows = {}
             local dropConnections = {}
-            local dropRowConnections = {}
 
             local function dropTrack(connection)
                 dropConnections[#dropConnections + 1] = connection
                 return connection
             end
 
-            local dropStatusLabel
-            local function dropStatus(message)
-                message = tostring(message or "-")
-                if dropStatusLabel and dropStatusLabel.Parent then
-                    dropStatusLabel.Text = "STATUS: " .. message
-                end
-                print("[GB DROP INVENTORY]", message)
-            end
-
             local dropToggle = makeButton(
                 "DROP SELECTED INVENTORY  ▼", 34, page, Theme.Accent
             )
-            dropToggle.LayoutOrder = 4
+            dropToggle.Name = "DropSelectedInventoryExpandToggle"
+            dropToggle.LayoutOrder = 7
 
             local dropPanel = create("Frame", {
                 Name = "DropSelectedInventoryPanel",
@@ -2614,7 +2601,7 @@ end
                 BackgroundColor3 = Theme.Panel,
                 BorderSizePixel = 0,
                 Visible = false,
-                LayoutOrder = 5,
+                LayoutOrder = 8,
             }, page)
             corner(dropPanel, 8)
 
@@ -2630,254 +2617,12 @@ end
                 SortOrder = Enum.SortOrder.LayoutOrder,
             }, dropPanel)
 
-            dropStatusLabel = makeLabel(
-                "STATUS: tekan SCAN SELECTED INVENTORY", 30, dropPanel
-            )
-            dropStatusLabel.LayoutOrder = 1
-
-            local dropSummaryLabel = makeLabel(
-                "ITEM TERBACA: 0 | ITEM DIPILIH: 0", 24, dropPanel
-            )
-            dropSummaryLabel.LayoutOrder = 2
-
-            local dropScanButton = makeButton(
-                "SCAN SELECTED INVENTORY", 32, dropPanel, Theme.PanelDark
-            )
-            dropScanButton.TextColor3 = Theme.Text
-            dropScanButton.LayoutOrder = 3
-
-            local dropSelectAllButton = makeButton(
-                "PILIH SEMUA ITEM", 30, dropPanel, Theme.PanelDark
-            )
-            dropSelectAllButton.TextColor3 = Theme.Text
-            dropSelectAllButton.LayoutOrder = 4
-
-            local dropList = create("ScrollingFrame", {
-                Name = "DropInventoryList",
-                Size = UDim2.new(1, 0, 0, 170),
-                BackgroundColor3 = Theme.Background,
-                BorderSizePixel = 0,
-                ScrollBarThickness = 5,
-                CanvasSize = UDim2.new(0, 0, 0, 0),
-                AutomaticCanvasSize = Enum.AutomaticSize.Y,
-                ScrollingDirection = Enum.ScrollingDirection.Y,
-                LayoutOrder = 5,
-            }, dropPanel)
-            corner(dropList, 6)
-
-            create("UIPadding", {
-                PaddingTop = UDim.new(0, 5),
-                PaddingBottom = UDim.new(0, 5),
-                PaddingLeft = UDim.new(0, 5),
-                PaddingRight = UDim.new(0, 5),
-            }, dropList)
-
-            local dropListLayout = create("UIListLayout", {
-                Padding = UDim.new(0, 4),
-                SortOrder = Enum.SortOrder.LayoutOrder,
-            }, dropList)
-
-            dropTrack(dropListLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-                dropList.CanvasSize = UDim2.new(0, 0, 0, dropListLayout.AbsoluteContentSize.Y + 10)
-            end))
-
             local dropButton = makeButton(
-                "DROP SEMUA JUMLAH ITEM TERPILIH", 36, dropPanel, Theme.Green
+                "DROP ITEM YANG SEDANG DIPILIH", 36, dropPanel, Theme.PanelDark
             )
-            dropButton.LayoutOrder = 6
-
-            local function dropInventoryCount(id)
-                return countItem(id)
-            end
-
-            local function dropUpdateSummary(itemCount)
-                local selectedCount = 0
-                for id in pairs(dropSelected) do
-                    if dropSelected[id] then selectedCount += 1 end
-                end
-                dropSummaryLabel.Text = ("ITEM TERBACA: %d | ITEM DIPILIH: %d"):format(
-                    itemCount or #dropRows, selectedCount
-                )
-            end
-
-            local function dropRenderRows()
-                for _, connection in ipairs(dropRowConnections) do
-                    pcall(function() connection:Disconnect() end)
-                end
-                table.clear(dropRowConnections)
-                for _, row in ipairs(dropRows) do
-                    if row.button and row.button.Parent then
-                        row.button:Destroy()
-                    end
-                end
-                table.clear(dropRows)
-
-                local slots = raw(refs.Inv, "slots")
-                if type(slots) ~= "table" then
-                    dropStatus("INVENTORY BELUM TERBACA. TEKAN SCAN.")
-                    dropUpdateSummary(0)
-                    return
-                end
-
-                local totals = {}
-                for _, slot in pairs(slots) do
-                    if type(slot) == "table" then
-                        local id = tonumber(raw(slot, "id"))
-                        local amount = tonumber(raw(slot, "n")) or 0
-                        if id and id > 0 and amount > 0 then
-                            id = math.floor(id)
-                            totals[id] = (totals[id] or 0) + amount
-                        end
-                    end
-                end
-
-                local ids = {}
-                for id in pairs(totals) do ids[#ids + 1] = id end
-                table.sort(ids)
-
-                for index, id in ipairs(ids) do
-                    local amount = totals[id]
-                    local selected = dropSelected[id] == true
-                    local button = create("TextButton", {
-                        Name = "DropItem_" .. tostring(id),
-                        Size = UDim2.new(1, -2, 0, 29),
-                        BackgroundColor3 = selected and Theme.Green or Theme.PanelDark,
-                        BorderSizePixel = 0,
-                        Text = (selected and "[✓] " or "[ ] ")
-                            .. ("ITEM ID %d  |  JUMLAH %d"):format(id, amount),
-                        TextColor3 = selected and Theme.White or Theme.Text,
-                        Font = Enum.Font.GothamBold,
-                        TextSize = 10,
-                        AutoButtonColor = true,
-                        LayoutOrder = index,
-                    }, dropList)
-                    corner(button, 5)
-                    dropRows[#dropRows + 1] = { id = id, amount = amount, button = button }
-
-                    dropRowConnections[#dropRowConnections + 1] = button.Activated:Connect(function()
-                        if dropBusy or not dropAlive then return end
-                        dropSelected[id] = not dropSelected[id] or nil
-                        button.BackgroundColor3 = dropSelected[id] and Theme.Green or Theme.PanelDark
-                        button.TextColor3 = dropSelected[id] and Theme.White or Theme.Text
-                        button.Text = (dropSelected[id] and "[✓] " or "[ ] ")
-                            .. ("ITEM ID %d  |  JUMLAH %d"):format(id, dropInventoryCount(id))
-                        dropUpdateSummary(#ids)
-                    end)
-                end
-
-                -- Hapus pilihan yang sudah tidak ada dalam inventory.
-                local available = {}
-                for _, id in ipairs(ids) do available[id] = true end
-                for id in pairs(dropSelected) do
-                    if not available[id] then dropSelected[id] = nil end
-                end
-
-                dropUpdateSummary(#ids)
-                if #ids == 0 then
-                    dropStatus("INVENTORY KOSONG.")
-                else
-                    dropStatus(("SCAN SELESAI. %d JENIS ITEM DITEMUKAN."):format(#ids))
-                end
-            end
-
-            local function dropScan()
-                if dropBusy then
-                    dropStatus("TUNGGU PROSES DROP SELESAI.")
-                    return false
-                end
-                if type(getgc) ~= "function" then
-                    dropStatus("EXECUTOR TIDAK MENYEDIAKAN getgc.")
-                    return false
-                end
-
-                dropStatus("MEMINDAI INVENTORY DAN HUD GAME...")
-                local ok, objects = pcall(getgc, true)
-                if not ok or type(objects) ~= "table" then
-                    dropStatus("getgc(true) GAGAL: " .. tostring(objects))
-                    return false
-                end
-
-                local bestInv
-                local foundHud
-                for _, object in ipairs(objects) do
-                    if type(object) == "table" then
-                        local candidate = inventoryCandidate(object)
-                        if candidate and (not bestInv or candidate.score > bestInv.score) then
-                            bestInv = candidate
-                        end
-
-                        if not foundHud
-                            and type(raw(object, "punchRange")) == "function"
-                            and type(raw(object, "handPower")) == "function"
-                            and type(raw(object, "onDrop")) == "function" then
-                            foundHud = object
-                        end
-                    end
-                end
-
-                if bestInv then refs.Inv = bestInv.ref end
-                dropHud = foundHud
-                dropOnDrop = foundHud and raw(foundHud, "onDrop") or nil
-
-                if not refs.Inv then
-                    dropStatus("INVENTORY TIDAK DITEMUKAN.")
-                    return false
-                end
-                if type(dropOnDrop) ~= "function" then
-                    dropStatus("HUD DITEMUKAN/TIDAK: FUNGSI onDrop TIDAK DITEMUKAN.")
-                    dropRenderRows()
-                    return false
-                end
-
-                dropRenderRows()
-                dropStatus("SCAN SELESAI. HUD.onDrop SIAP.")
-                return true
-            end
-
-            local function dropOneItem(id, requested)
-                local left = math.min(math.max(0, math.floor(tonumber(requested) or 0)),
-                    dropInventoryCount(id))
-                local initial = left
-                local flipped = false
-
-                while left > 0 and dropAlive and not destroyed and not Hub.IsClosing() do
-                    local before = dropInventoryCount(id)
-                    local amount = math.min(left, 200)
-                    local ok, err = pcall(dropOnDrop, id, amount)
-                    if not ok then
-                        return initial - left, "onDrop error: " .. tostring(err)
-                    end
-
-                    task.wait(0.7)
-                    local after = dropInventoryCount(id)
-                    local got = before - after
-                    if got > 0 then
-                        left = math.max(0, left - got)
-                        flipped = false
-                    elseif not flipped then
-                        -- Sama seperti K.lua: bila sisi depan terhalang, balik arah sekali.
-                        local state = nil
-                        if type(refs.State) == "function" then
-                            local good, value = pcall(refs.State)
-                            if good then state = value end
-                        end
-                        local right = state and (state.facing or 1) < 0 or false
-                        if moveConnected then
-                            moveSetInput("right", right)
-                            moveSetInput("left", not right)
-                            task.wait(0.06)
-                            moveSetInput("right", false)
-                            moveSetInput("left", false)
-                        end
-                        task.wait(0.3)
-                        flipped = true
-                    else
-                        return initial - left, "tidak bisa drop di posisi ini"
-                    end
-                end
-
-                return initial - left, nil
-            end
+            dropButton.Name = "DropCurrentSelectedInventoryButton"
+            dropButton.TextColor3 = Theme.Text
+            dropButton.LayoutOrder = 1
 
             dropTrack(dropToggle.Activated:Connect(function()
                 dropPanel.Visible = not dropPanel.Visible
@@ -2886,84 +2631,64 @@ end
                     or "DROP SELECTED INVENTORY  ▼"
             end))
 
-            dropTrack(dropScanButton.Activated:Connect(function()
-                if dropScan() then
-                    dropStatus("SCAN SELESAI. PILIH ITEM YANG AKAN DI-DROP.")
-                end
-            end))
-
-            dropTrack(dropSelectAllButton.Activated:Connect(function()
-                if dropBusy then return end
-                if #dropRows == 0 then
-                    dropStatus("SCAN INVENTORY TERLEBIH DAHULU.")
-                    return
-                end
-                for _, row in ipairs(dropRows) do
-                    dropSelected[row.id] = true
-                    if row.button and row.button.Parent then
-                        row.button.BackgroundColor3 = Theme.Green
-                        row.button.TextColor3 = Theme.White
-                        row.button.Text = "[✓] " .. ("ITEM ID %d  |  JUMLAH %d"):format(
-                            row.id, dropInventoryCount(row.id)
-                        )
-                    end
-                end
-                dropUpdateSummary(#dropRows)
-                dropStatus("SEMUA ITEM INVENTORY DIPILIH.")
-            end))
-
             dropTrack(dropButton.Activated:Connect(function()
-                if dropBusy then return end
-                if not refs.Inv or type(dropOnDrop) ~= "function" then
-                    dropStatus("TEKAN SCAN SELECTED INVENTORY TERLEBIH DAHULU.")
+                if not dropAlive or destroyed then return end
+
+                -- selectedId() membaca slot yang sedang aktif sekarang,
+                -- bukan ID yang pernah dipindai/disimpan sebelumnya.
+                local id = selectedId()
+                if not id then
+                    print("[GB DROP INVENTORY] Tidak ada item yang sedang dipilih.")
                     return
                 end
 
-                local selectedIds = {}
-                for id, selected in pairs(dropSelected) do
-                    if selected and dropInventoryCount(id) > 0 then
-                        selectedIds[#selectedIds + 1] = id
-                    end
-                end
-                table.sort(selectedIds)
-                if #selectedIds == 0 then
-                    dropStatus("BELUM ADA ITEM YANG DIPILIH.")
+                local amount = countItem(id)
+                if amount <= 0 then
+                    print(("[GB DROP INVENTORY] Item ID %d tidak ada di inventory."):format(id))
                     return
                 end
 
-                dropBusy = true
-                dropButton.Active = false
-                dropStatus(("MULAI DROP %d JENIS ITEM..."):format(#selectedIds))
+                if type(getgc) ~= "function" then
+                    print("[GB DROP INVENTORY] Executor tidak menyediakan getgc.")
+                    return
+                end
 
-                task.spawn(function()
-                    local totalDropped = 0
-                    local failed = {}
-                    for _, id in ipairs(selectedIds) do
-                        if not dropAlive or destroyed or Hub.IsClosing() then break end
-                        local amount = dropInventoryCount(id)
-                        if amount > 0 then
-                            dropStatus(("DROP ITEM ID %d | JUMLAH %d..."):format(id, amount))
-                            local got, err = dropOneItem(id, amount)
-                            totalDropped += got
-                            if err then
-                                failed[#failed + 1] = ("ID %d: %s"):format(id, tostring(err))
-                            end
+                -- Cari fungsi HUD.onDrop pada saat tombol ditekan.
+                -- Pencarian ini tidak mengubah inventory selection dan tidak
+                -- menjalankan pemindaian berkala.
+                local ok, objects = pcall(getgc, true)
+                if not ok or type(objects) ~= "table" then
+                    print("[GB DROP INVENTORY] Gagal membaca objek game: " .. tostring(objects))
+                    return
+                end
+
+                local onDrop
+                for _, object in ipairs(objects) do
+                    if type(object) == "table"
+                        and type(raw(object, "punchRange")) == "function"
+                        and type(raw(object, "handPower")) == "function" then
+                        local candidate = raw(object, "onDrop")
+                        if type(candidate) == "function" then
+                            onDrop = candidate
+                            break
                         end
                     end
+                end
 
-                    dropBusy = false
-                    if dropButton and dropButton.Parent then dropButton.Active = true end
-                    dropRenderRows()
-                    if #failed > 0 then
-                        dropStatus(("SELESAI SEBAGIAN. TOTAL DROP %d. GAGAL: %s"):format(
-                            totalDropped, table.concat(failed, " | ")
-                        ))
-                    else
-                        dropStatus(("SELESAI. TOTAL ITEM BERHASIL DI-DROP: %d."):format(
-                            totalDropped
-                        ))
-                    end
-                end)
+                if not onDrop then
+                    print("[GB DROP INVENTORY] Fungsi HUD.onDrop tidak ditemukan.")
+                    return
+                end
+
+                -- Satu pemanggilan saja, tanpa loop/retry/batch.
+                local dropOk, dropError = pcall(onDrop, id, amount)
+                if dropOk then
+                    print(("[GB DROP INVENTORY] Perintah drop dikirim: ID %d | JUMLAH %d"):format(
+                        id, amount
+                    ))
+                else
+                    print("[GB DROP INVENTORY] onDrop error: " .. tostring(dropError))
+                end
             end))
 
             local function dropCleanup()
@@ -2973,20 +2698,12 @@ end
                     pcall(function() connection:Disconnect() end)
                 end
                 table.clear(dropConnections)
-                for _, connection in ipairs(dropRowConnections) do
-                    pcall(function() connection:Disconnect() end)
-                end
-                table.clear(dropRowConnections)
-                dropSelected = {}
-                dropRows = {}
-                dropHud = nil
-                dropOnDrop = nil
             end
 
             Hub.RegisterCleanup(dropCleanup)
-            dropStatus("SUBMODULE DIMUAT. TEKAN SCAN UNTUK MEMBACA INVENTORY.")
             print("[GB DROP INVENTORY] Submodule loaded.")
         end
+
     end)
 
 end -- return function(Hub)
