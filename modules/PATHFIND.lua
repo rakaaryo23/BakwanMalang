@@ -451,9 +451,12 @@ return function(Hub)
             end
 
             if direction == "UP" then
-                -- Lepas jump setelah fase hold, tetapi lanjutkan arah sebentar
-                -- agar momentum gerak ke dalam tetap terbawa.
+                -- Lepas JUMP setelah total 0.4 detik.
+                -- Tombol arah MASUK tetap ditahan terus, bukan tap-tap,
+                -- sampai perubahan baris Y benar-benar terdeteksi.
                 setInput("jump", false)
+                setInput(oppositeKey, false)
+                setInput(inwardKey, true)
                 task.wait(0.08)
             end
 
@@ -476,6 +479,11 @@ return function(Hub)
                     or (direction == "DOWN" and nowRow > startRow) then
                     changed = true
                     break
+                end
+
+                if direction == "UP" then
+                    setInput(inwardKey, true)
+                    setInput(oppositeKey, false)
                 end
 
                 if os.clock() - startedAt > 3.5 then
