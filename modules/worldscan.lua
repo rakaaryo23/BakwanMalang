@@ -35,6 +35,7 @@ return function(Hub)
         local scanning = false
         local refreshing = false
         local worldRef = nil
+        local worldMeta = nil
         local connections = {}
         local tileButtons = {}
         local selected = nil
@@ -113,13 +114,55 @@ return function(Hub)
             return ok and value or nil
         end
 
-        local function validWorld(t)
-            return type(t) == "table"
-                and type(safeRaw(t, "fg")) == "table"
-                and type(safeRaw(t, "bg")) == "table"
-                and type(safeRaw(t, "w")) == "number"
-                and type(safeRaw(t, "h")) == "number"
-                and safeRaw(t, "spawn") ~= nil
+        -- Validasi lebih ketat daripada sekadar menemukan tabel bernama fg/bg.
+        -- Ukuran harus tepat 100x60 dan layer harus memiliki baris tile yang valid.
+        local function inspectWorld(t)
+            if type(t) ~= "table" then return nil end
+            local width = tonumber(safeRaw(t, "w"))
+            local height = tonumber(safeRaw(t, "h"))
+            local fgLayer = safeRaw(t, "fg")
+            local bgLayer = safeRaw(t, "bg")
+            local spawn = safeRaw(t, "spawn")
+
+            if width ~= EXPECTED_W or height ~= EXPECTED_H
+                or type(fgLayer) ~= "table" or type(bgLayer) ~= "table"
+                or spawn == nil then
+                return nil
+            end
+
+            local validRows, numericCells, nonZeroCells = 0, 0, 0
+            for y = 0, EXPECTED_H - 1 do
+                local fgRow = fgLayer[y]
+                local bgRow = bgLayer[y]
+                if type(fgRow) == "table" and type(bgRow) == "table" then
+                    validRows += 1
+                    for x = 0, EXPECTED_W - 1 do
+                        if type(fgRow[x]) == "number" then
+                            numericCells += 1
+                            if fgRow[x] ~= 0 then nonZeroCells += 1 end
+                        end
+                        if type(bgRow[x]) == "number" then
+                            numericCells += 1
+                            if bgRow[x] ~= 0 then nonZeroCells += 1 end
+                        end
+                    end
+                end
+            end
+
+            -- Kandidat harus memiliki struktur baris yang masuk akal.
+            if validRows < math.floor(EXPECTED_H * 0.8) or numericCells == 0 then
+                return nil
+            end
+
+            return {
+                ref = t,
+                width = width,
+                height = height,
+                validRows = validRows,
+                numericCells = numericCells,
+                nonZeroCells = nonZeroCells,
+                spawn = spawn,
+            }
         end
 
         local function scanWorldOnce()
@@ -132,29 +175,44 @@ return function(Hub)
                 return false, "getgc(true) gagal: " .. tostring(objects)
             end
 
-            local found
+            local candidates = {}
             for _, object in ipairs(objects) do
-                if type(object) == "table" and validWorld(object) then
-                    found = object
-                    break
+                if type(object) == "table" then
+                    local info = inspectWorld(object)
+                    if info then
+                        candidates[#candidates + 1] = info
+                    end
                 end
             end
 
-            if not found then
-                return false, "Tabel World (fg/bg/w/h/spawn) belum ditemukan"
+            if #candidates == 0 then
+                return false, "Tidak ada kandidat World valid 100x60 dengan layer FG/BG terbaca"
             end
 
-            worldRef = found
-            local width = tonumber(safeRaw(found, "w"))
-            local height = tonumber(safeRaw(found, "h"))
-            if width ~= EXPECTED_W or height ~= EXPECTED_H then
-                return false, string.format(
-                    "World ditemukan, tetapi ukurannya %sx%s (diharapkan %dx%d)",
-                    tostring(width), tostring(height), EXPECTED_W, EXPECTED_H
-                )
-            end
+            -- Pilih kandidat dengan cakupan baris dan data numerik paling lengkap.
+            table.sort(candidates, function(a, b)
+                if a.validRows ~= b.validRows then
+                    return a.validRows > b.validRows
+                end
+                if a.numericCells ~= b.numericCells then
+                    return a.numericCells > b.numericCells
+                end
+                return a.nonZeroCells > b.nonZeroCells
+            end)
 
-            return true, string.format("World ditemukan: %dx%d", width, height)
+            local chosen = candidates[1]
+            worldRef = chosen.ref
+            worldMeta = {
+                candidateCount = #candidates,
+                validRows = chosen.validRows,
+                numericCells = chosen.numericCells,
+                nonZeroCells = chosen.nonZeroCells,
+            }
+            return true, string.format(
+                "World tervalidasi %dx%d | baris FG/BG: %d/%d | nilai numerik: %d | tile layer nonzero: %d | kandidat: %d",
+                chosen.width, chosen.height, chosen.validRows, EXPECTED_H,
+                chosen.numericCells, chosen.nonZeroCells, #candidates
+            )
         end
 
         -- Mengikuti indeks tile pada module utama: world[layer][y][x].
@@ -179,6 +237,90 @@ return function(Hub)
             if fg == nil then fg = 0 end
             if bg == nil then bg = 0 end
             return fg, bg
+        end
+
+        local function writeClipboard(value)
+            value = tostring(value or "")
+            local writers = { setclipboard, toclipboard }
+            for _, writer in pairs(writers) do
+                if type(writer) == "function" then
+                    local ok, err = pcall(writer, value)
+                    if ok then return true end
+                    log("Clipboard API gagal:", err)
+                end
+            end
+            return false, "Executor tidak menyediakan setclipboard/toclipboard"
+        end
+
+        local function copySelectedTile()
+            if not worldRef then
+                setStatus("COPY TILE GAGAL: World belum di-scan")
+                return
+            end
+            if not selected then
+                setStatus("Pilih tile terlebih dahulu")
+                return
+            end
+
+            local fg, bg = readTile(selected.x, selected.y)
+            if fg == nil or bg == nil then
+                setStatus("COPY TILE GAGAL: data tile tidak terbaca")
+                return
+            end
+
+            local payload = string.format(
+                "WORLD TILE DATA\nworld_size=%dx%d\ncandidate_count=%d\nx=%d\ny=%d\nfg=%s\nbg=%s\n",
+                EXPECTED_W, EXPECTED_H,
+                worldMeta and worldMeta.candidateCount or 0,
+                selected.x, selected.y, tostring(fg), tostring(bg)
+            )
+            local ok, err = writeClipboard(payload)
+            if ok then
+                setStatus(string.format("Tile (%d,%d) disalin | FG=%s | BG=%s", selected.x, selected.y, tostring(fg), tostring(bg)))
+            else
+                setStatus("Clipboard tidak tersedia: " .. tostring(err))
+            end
+        end
+
+        local function copyEntireWorld()
+            if not worldRef then
+                setStatus("COPY WORLD GAGAL: World belum di-scan")
+                return
+            end
+
+            setStatus("Menyusun data 6.000 tile untuk clipboard...")
+            local lines = {
+                "# GROWBLOX WORLD SCAN",
+                "# width=" .. EXPECTED_W .. " height=" .. EXPECTED_H,
+                "# coordinate_origin=0,0",
+                "# layer_index=world[layer][y][x]",
+                "# candidate_count=" .. tostring(worldMeta and worldMeta.candidateCount or 0),
+                "# validated_rows=" .. tostring(worldMeta and worldMeta.validRows or 0),
+                "# numeric_layer_values=" .. tostring(worldMeta and worldMeta.numericCells or 0),
+                "# nonzero_layer_values=" .. tostring(worldMeta and worldMeta.nonZeroCells or 0),
+                "x,y,fg,bg",
+            }
+
+            for y = 0, EXPECTED_H - 1 do
+                for x = 0, EXPECTED_W - 1 do
+                    local fg, bg = readTile(x, y)
+                    if fg == nil or bg == nil then
+                        setStatus(string.format("COPY WORLD DIBATALKAN: row FG/BG tidak terbaca pada (%d,%d)", x, y))
+                        return
+                    end
+                    lines[#lines + 1] = string.format("%d,%d,%s,%s", x, y, tostring(fg), tostring(bg))
+                end
+                if y % 10 == 9 then task.wait() end
+                if not running then return end
+            end
+
+            local payload = table.concat(lines, "\n")
+            local ok, err = writeClipboard(payload)
+            if ok then
+                setStatus(string.format("SELURUH WORLD DISALIN: %d tile | %d karakter CSV", EXPECTED_W * EXPECTED_H, #payload))
+            else
+                setStatus("Clipboard tidak tersedia: " .. tostring(err))
+            end
         end
 
         local function tileColor(fg, bg)
@@ -421,6 +563,25 @@ return function(Hub)
         clearButton.Size = UDim2.new(0.33, -4, 1, 0)
         clearButton.LayoutOrder = 3
 
+        local copyRow = create("Frame", {
+            Name = "WorldScannerCopyActions",
+            Size = UDim2.new(1, 0, 0, 34),
+            BackgroundTransparency = 1,
+            LayoutOrder = 5,
+        }, panel)
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, copyRow)
+
+        local copyTileButton = makeButton("COPY TILE", 32, copyRow, Theme.Accent)
+        copyTileButton.Size = UDim2.new(0.34, -4, 1, 0)
+        copyTileButton.LayoutOrder = 1
+        local copyWorldButton = makeButton("COPY WORLD CSV", 32, copyRow, Theme.Green)
+        copyWorldButton.Size = UDim2.new(0.66, -2, 1, 0)
+        copyWorldButton.LayoutOrder = 2
+
         mapScroll = create("ScrollingFrame", {
             Name = "WorldScannerMapScroll",
             Size = UDim2.new(1, 0, 0, 390),
@@ -432,7 +593,7 @@ return function(Hub)
                 EXPECTED_W * CELL_SIZE + (EXPECTED_W - 1) * CELL_GAP,
                 EXPECTED_H * CELL_SIZE + (EXPECTED_H - 1) * CELL_GAP
             ),
-            LayoutOrder = 5,
+            LayoutOrder = 6,
         }, panel)
         corner(mapScroll, 5)
 
@@ -468,6 +629,11 @@ return function(Hub)
             end
         end))
 
+        track(copyTileButton.Activated:Connect(copySelectedTile))
+        track(copyWorldButton.Activated:Connect(function()
+            task.spawn(copyEntireWorld)
+        end))
+
         track(clearButton.Activated:Connect(function()
             local old = selected
             selected = nil
@@ -485,6 +651,7 @@ return function(Hub)
             table.clear(connections)
             table.clear(tileButtons)
             worldRef = nil
+            worldMeta = nil
             log("MODULE DITUTUP; seluruh koneksi UI diputus")
         end
 
