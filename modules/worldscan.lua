@@ -663,5 +663,5 @@ return function(Hub)
 end
 
 --==================================================
--- END MODULE: WORLD PLACED BLOCK SCANNER
+-- END MODULE: WORLD PLACED BLOCK SCANNER 
 --==================================================
