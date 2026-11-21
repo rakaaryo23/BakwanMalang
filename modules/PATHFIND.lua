@@ -426,20 +426,19 @@ return function(Hub)
                 ))
                 task.wait(0.70)
 
-                -- Tahap 1: tahan JUMP selama total 0.7 detik.
+                -- JUMP total 0.4 detik.
+                -- Setelah 0.2 detik pertama, tekan arah masuk sambil tetap menahan JUMP.
                 setInput("down", false)
                 setInput(oppositeKey, false)
                 setInput("jump", true)
                 task.wait(0.20)
 
-                -- Tahap 2: setelah 0.2 detik jump ditahan,
-                -- tekan arah masuk sambil JUMP tetap ditahan.
                 setStatus(string.format(
                     "JUMP + HOLD %s DARI X=%d",
                     string.upper(inwardKey), corridorTileX
                 ))
                 setInput(inwardKey, true)
-                task.wait(0.50)
+                task.wait(0.20)
             else
                 setStatus(string.format(
                     "TURUN | MENUNGGU JATUH DARI TILE KOSONG X=%d",
@@ -500,9 +499,11 @@ return function(Hub)
             return true
         end
 
-        -- Setelah X masuk toleransi, tetap verifikasi dan koreksi selama 1.4 detik.
+        -- Mendekati X target dengan gerakan tap-tap saat jarak kurang dari 3 tile.
+        -- Posisi harus sangat dekat dan stabil selama 0.5 detik sebelum dianggap selesai.
         local function moveHorizontalStableTo(xGoal, tolerance)
             tolerance = tolerance or 0.16
+            local preciseTolerance = 0.08
             local stableSince = nil
             local startedAt = os.clock()
 
@@ -514,14 +515,33 @@ return function(Hub)
                     "POSISI: X %.2f | Y %.2f", state.x, state.y
                 )
                 local dx = xGoal - state.x
+                local distance = math.abs(dx)
 
-                if math.abs(dx) <= tolerance then
-                    releaseAll()
-                    if not stableSince then stableSince = os.clock() end
-                    if os.clock() - stableSince >= 1.4 then
+                if distance <= preciseTolerance then
+                    setInput("left", false)
+                    setInput("right", false)
+
+                    if not stableSince then
+                        stableSince = os.clock()
+                        setStatus("X HAMPIR TEPAT | VERIFIKASI POSISI 0.5 DETIK")
+                    elseif os.clock() - stableSince >= 0.5 then
+                        releaseAll()
                         return true
                     end
+
+                elseif distance < 3 then
+                    -- Zona pendekatan: jangan hold arah terus-menerus.
+                    -- Tekan arah sebentar, lepas, baca posisi lagi, lalu ulangi.
+                    stableSince = nil
+                    local tapKey = dx > 0 and "right" or "left"
+                    setInput(tapKey == "right" and "left" or "right", false)
+                    setInput(tapKey, true)
+                    task.wait(0.06)
+                    setInput(tapKey, false)
+                    task.wait(0.07)
+
                 else
+                    -- Lebih dari 3 tile: gerak normal dengan tombol ditahan.
                     stableSince = nil
                     if dx > 0 then
                         setInput("left", false)
@@ -530,12 +550,15 @@ return function(Hub)
                         setInput("right", false)
                         setInput("left", true)
                     end
+                    if not waitStep() then
+                        return false, "GO dihentikan saat bergerak ke X target"
+                    end
                 end
 
-                if os.clock() - startedAt > 8 then
+                if os.clock() - startedAt > 15 then
                     return false, "Timeout saat mengunci posisi X akhir"
                 end
-                if not waitStep() then
+                if not running or stopRequested or not goRunning then
                     return false, "GO dihentikan saat verifikasi X akhir"
                 end
             end
@@ -577,22 +600,33 @@ return function(Hub)
                             local moved, moveError = moveHorizontalStableTo(target.x, tolerance)
                             if not moved then error(moveError) end
 
-                            -- Tunggu posisi state mendekati koordinat LOCK, bukan hanya tile yang sama.
+                            -- Jangan nyatakan selesai hanya karena sempat melewati target.
+                            -- X dan Y harus tetap sangat dekat selama 0.5 detik.
+                            local finalStableSince = nil
                             while goRunning and not stopRequested do
                                 local finalState = currentState()
                                 if not finalState then error("PlayerState tidak terbaca saat verifikasi tujuan") end
                                 positionLabel.Text = string.format("POSISI: X %.2f | Y %.2f", finalState.x, finalState.y)
                                 local dx = math.abs(finalState.x - target.x)
                                 local dy = math.abs(finalState.y - target.y)
-                                if dx <= tolerance and dy <= 0.22 then
+
+                                if dx <= 0.08 and dy <= 0.12 then
                                     releaseAll()
-                                    setStatus(string.format("TUJUAN TERCAPAI | X %.2f Y %.2f", finalState.x, finalState.y))
-                                    return
+                                    if not finalStableSince then
+                                        finalStableSince = os.clock()
+                                        setStatus("POSISI HAMPIR TEPAT | MEMASTIKAN STABIL 0.5 DETIK")
+                                    elseif os.clock() - finalStableSince >= 0.5 then
+                                        setStatus(string.format("TUJUAN TERCAPAI | X %.2f Y %.2f", finalState.x, finalState.y))
+                                        return
+                                    end
+                                else
+                                    finalStableSince = nil
+                                    if dx > 0.08 then
+                                        local ok, err = moveHorizontalStableTo(target.x, tolerance)
+                                        if not ok then error(err) end
+                                    end
                                 end
-                                if dx > tolerance then
-                                    local ok, err = moveHorizontalStableTo(target.x, tolerance)
-                                    if not ok then error(err) end
-                                end
+
                                 if not waitStep() then break end
                             end
                             if stopRequested then return end
