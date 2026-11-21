@@ -2634,34 +2634,69 @@ end
             dropTrack(dropButton.Activated:Connect(function()
                 if not dropAlive or destroyed then return end
 
-                -- selectedId() membaca slot yang sedang aktif sekarang,
-                -- bukan ID yang pernah dipindai/disimpan sebelumnya.
-                local id = selectedId()
-                if not id then
-                    print("[GB DROP INVENTORY] Tidak ada item yang sedang dipilih.")
-                    return
-                end
-
-                local amount = countItem(id)
-                if amount <= 0 then
-                    print(("[GB DROP INVENTORY] Item ID %d tidak ada di inventory."):format(id))
-                    return
-                end
-
                 if type(getgc) ~= "function" then
                     print("[GB DROP INVENTORY] Executor tidak menyediakan getgc.")
                     return
                 end
 
-                -- Cari fungsi HUD.onDrop pada saat tombol ditekan.
-                -- Pencarian ini tidak mengubah inventory selection dan tidak
-                -- menjalankan pemindaian berkala.
+                -- Jangan memakai refs.Inv dari discovery modul utama:
+                -- discovery tersebut memilih kandidat inventory generik, yang
+                -- belum tentu objek Inventory game yang memiliki field selected.
+                -- Ambil objek Inventory aktif langsung saat tombol ditekan.
                 local ok, objects = pcall(getgc, true)
                 if not ok or type(objects) ~= "table" then
                     print("[GB DROP INVENTORY] Gagal membaca objek game: " .. tostring(objects))
                     return
                 end
 
+                local liveInventory
+                for _, object in ipairs(objects) do
+                    if type(object) == "table" then
+                        local slots = raw(object, "slots")
+                        local capacity = raw(object, "capacity")
+                        local selected
+                        pcall(function()
+                            selected = tonumber(object.selected)
+                        end)
+
+                        if type(slots) == "table"
+                            and type(capacity) == "number"
+                            and selected and selected > 0 then
+                            liveInventory = object
+                            break
+                        end
+                    end
+                end
+
+                if not liveInventory then
+                    print("[GB DROP INVENTORY] Objek inventory aktif / selected tidak ditemukan.")
+                    return
+                end
+
+                local id
+                pcall(function()
+                    id = tonumber(liveInventory.selected)
+                end)
+                if not id or id <= 0 then
+                    print("[GB DROP INVENTORY] Tidak ada item yang sedang dipilih.")
+                    return
+                end
+                id = math.floor(id)
+
+                local amount = 0
+                local slots = raw(liveInventory, "slots")
+                for _, slot in pairs(slots) do
+                    if type(slot) == "table"
+                        and tonumber(raw(slot, "id")) == id then
+                        amount += tonumber(raw(slot, "n")) or 0
+                    end
+                end
+                if amount <= 0 then
+                    print(("[GB DROP INVENTORY] Item ID %d tidak ada di inventory."):format(id))
+                    return
+                end
+
+                -- Cari fungsi HUD.onDrop pada saat tombol ditekan.
                 local onDrop
                 for _, object in ipairs(objects) do
                     if type(object) == "table"
