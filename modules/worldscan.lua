@@ -1,14 +1,25 @@
 --==================================================
--- MODULE: WORLD PLACED BLOCK SCANNER
--- Tab mandiri: menampilkan grid world 100 x 60.
--- Tap tile untuk membaca FG ID dan BG ID pada koordinat itu.
--- Menggunakan struktur world.fg / world.bg yang sama dengan
--- module utama dan module DIRT FARM PATHFINDING.
--- Tidak memasang hook dan tidak mengubah module lain.
+-- MODULE: SCAN 1 BLOCK ABOVE PLAYER
+-- Membaca FG dan BG pada tile tepat 1 block di atas player.
+-- Sumber posisi/world mengikuti pola discovery pada main.lua:
+--   state() -> {x, y, facing, vx, ...}
+--   world.fg[y][x], world.bg[y][x]
+-- Koordinat world menggunakan index 0-based.
 --==================================================
 
 return function(Hub)
-    Hub.RegisterTab("WORLD SCANNER", function(page)
+    Hub.RegisterTab("SCAN ABOVE PLAYER", function(page)
+        local Players = game:GetService("Players")
+        local LocalPlayer = Players.LocalPlayer
+
+        local destroyed = false
+        local live = false
+        local refs = {
+            world = nil,
+            stateFn = nil,
+        }
+        local connections = {}
+
         local Theme = {
             Background = Color3.fromRGB(250, 220, 228),
             Panel = Color3.fromRGB(239, 194, 207),
@@ -19,27 +30,7 @@ return function(Hub)
             White = Color3.fromRGB(255, 249, 251),
             Green = Color3.fromRGB(55, 140, 90),
             Red = Color3.fromRGB(180, 65, 75),
-            Empty = Color3.fromRGB(54, 54, 62),
-            FG = Color3.fromRGB(171, 91, 119),
-            BG = Color3.fromRGB(65, 125, 190),
-            Both = Color3.fromRGB(133, 88, 160),
-            Selected = Color3.fromRGB(255, 220, 70),
         }
-
-        local EXPECTED_W = 100
-        local EXPECTED_H = 60
-        local CELL_SIZE = 12
-        local CELL_GAP = 1
-
-        local running = true
-        local scanning = false
-        local refreshing = false
-        local worldRef = nil
-        local worldMeta = nil
-        local connections = {}
-        local tileButtons = {}
-        local selected = nil
-        local gridBuilt = false
 
         local function create(className, properties, parent)
             local object = Instance.new(className)
@@ -58,54 +49,8 @@ return function(Hub)
         end
 
         local function track(connection)
-            connections[#connections + 1] = connection
+            table.insert(connections, connection)
             return connection
-        end
-
-        local function makeLabel(text, height, parent)
-            return create("TextLabel", {
-                Size = UDim2.new(1, 0, 0, height or 25),
-                BackgroundTransparency = 1,
-                Text = text or "",
-                TextColor3 = Theme.Text,
-                Font = Enum.Font.Gotham,
-                TextSize = 11,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                TextYAlignment = Enum.TextYAlignment.Center,
-                TextWrapped = true,
-            }, parent)
-        end
-
-        local function makeButton(text, height, parent, color)
-            local button = create("TextButton", {
-                Size = UDim2.new(1, 0, 0, height or 34),
-                BackgroundColor3 = color or Theme.Accent,
-                BorderSizePixel = 0,
-                Text = text,
-                TextColor3 = Theme.White,
-                Font = Enum.Font.GothamBold,
-                TextSize = 10,
-                AutoButtonColor = true,
-            }, parent)
-            corner(button, 6)
-            return button
-        end
-
-        local function log(...)
-            print("[WORLD SCANNER]", ...)
-        end
-
-        local statusLabel
-        local selectedLabel
-        local mapScroll
-        local mapGrid
-
-        local function setStatus(message)
-            message = tostring(message or "-")
-            if statusLabel and statusLabel.Parent then
-                statusLabel.Text = "STATUS: " .. message
-            end
-            log(message)
         end
 
         local function safeRaw(t, key)
@@ -114,58 +59,98 @@ return function(Hub)
             return ok and value or nil
         end
 
-        -- Validasi lebih ketat daripada sekadar menemukan tabel bernama fg/bg.
-        -- Ukuran harus tepat 100x60 dan layer harus memiliki baris tile yang valid.
-        local function inspectWorld(t)
-            if type(t) ~= "table" then return nil end
-            local width = tonumber(safeRaw(t, "w"))
-            local height = tonumber(safeRaw(t, "h"))
-            local fgLayer = safeRaw(t, "fg")
-            local bgLayer = safeRaw(t, "bg")
-            local spawn = safeRaw(t, "spawn")
-
-            if width ~= EXPECTED_W or height ~= EXPECTED_H
-                or type(fgLayer) ~= "table" or type(bgLayer) ~= "table"
-                or spawn == nil then
-                return nil
-            end
-
-            local validRows, numericCells, nonZeroCells = 0, 0, 0
-            for y = 0, EXPECTED_H - 1 do
-                local fgRow = fgLayer[y]
-                local bgRow = bgLayer[y]
-                if type(fgRow) == "table" and type(bgRow) == "table" then
-                    validRows += 1
-                    for x = 0, EXPECTED_W - 1 do
-                        if type(fgRow[x]) == "number" then
-                            numericCells += 1
-                            if fgRow[x] ~= 0 then nonZeroCells += 1 end
-                        end
-                        if type(bgRow[x]) == "number" then
-                            numericCells += 1
-                            if bgRow[x] ~= 0 then nonZeroCells += 1 end
-                        end
-                    end
-                end
-            end
-
-            -- Kandidat harus memiliki struktur baris yang masuk akal.
-            if validRows < math.floor(EXPECTED_H * 0.8) or numericCells == 0 then
-                return nil
-            end
-
-            return {
-                ref = t,
-                width = width,
-                height = height,
-                validRows = validRows,
-                numericCells = numericCells,
-                nonZeroCells = nonZeroCells,
-                spawn = spawn,
-            }
+        local function makeLabel(text, height, parent, bold)
+            return create("TextLabel", {
+                Size = UDim2.new(1, 0, 0, height or 28),
+                BackgroundTransparency = 1,
+                Text = text or "",
+                TextColor3 = Theme.Text,
+                Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+                TextSize = 11,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextYAlignment = Enum.TextYAlignment.Center,
+                TextWrapped = true,
+            }, parent)
         end
 
-        local function scanWorldOnce()
+        local function makeButton(text, parent, color)
+            local button = create("TextButton", {
+                Size = UDim2.new(1, 0, 0, 34),
+                BackgroundColor3 = color or Theme.Accent,
+                BorderSizePixel = 0,
+                Text = text,
+                TextColor3 = Theme.White,
+                Font = Enum.Font.GothamBold,
+                TextSize = 11,
+                AutoButtonColor = true,
+            }, parent)
+            corner(button, 7)
+            return button
+        end
+
+        local container = create("Frame", {
+            Name = "ScanAbovePlayerPanel",
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = Theme.Panel,
+            BorderSizePixel = 0,
+        }, page)
+        corner(container, 8)
+
+        create("UIPadding", {
+            PaddingTop = UDim.new(0, 8),
+            PaddingBottom = UDim.new(0, 8),
+            PaddingLeft = UDim.new(0, 8),
+            PaddingRight = UDim.new(0, 8),
+        }, container)
+
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+        }, container)
+
+        local title = makeLabel("SCAN 1 BLOCK ABOVE PLAYER", 25, container, true)
+        title.LayoutOrder = 1
+
+        local infoLabel = makeLabel(
+            "Player: menunggu scan\nTile atas: -\nFG ID: - | BG ID: -",
+            68, container
+        )
+        infoLabel.LayoutOrder = 2
+
+        local statusLabel = makeLabel("Status: belum scan", 30, container)
+        statusLabel.TextColor3 = Theme.Muted
+        statusLabel.LayoutOrder = 3
+
+        local scanButton = makeButton("SCAN ABOVE PLAYER", container, Theme.Accent)
+        scanButton.LayoutOrder = 4
+
+        local liveButton = makeButton("LIVE SCAN: OFF", container, Theme.PanelDark)
+        liveButton.TextColor3 = Theme.Text
+        liveButton.LayoutOrder = 5
+
+        local function validWorld(candidate)
+            return type(candidate) == "table"
+                and type(safeRaw(candidate, "fg")) == "table"
+                and type(safeRaw(candidate, "bg")) == "table"
+                and type(safeRaw(candidate, "w")) == "number"
+                and type(safeRaw(candidate, "h")) == "number"
+                and safeRaw(candidate, "spawn") ~= nil
+        end
+
+        local function readState(fn)
+            if type(fn) ~= "function" then return nil end
+            local ok, value = pcall(fn)
+            if not ok or type(value) ~= "table" then return nil end
+            if type(value.x) ~= "number" or type(value.y) ~= "number" then
+                return nil
+            end
+            if value.facing == nil or value.vx == nil then return nil end
+            if value.active == false then return nil end
+            return value
+        end
+
+        local function discoverRefs()
             if type(getgc) ~= "function" then
                 return false, "Executor tidak menyediakan getgc"
             end
@@ -175,493 +160,153 @@ return function(Hub)
                 return false, "getgc(true) gagal: " .. tostring(objects)
             end
 
-            local candidates = {}
+            local foundWorld, foundStateFn
             for _, object in ipairs(objects) do
                 if type(object) == "table" then
-                    local info = inspectWorld(object)
-                    if info then
-                        candidates[#candidates + 1] = info
+                    if not foundWorld and validWorld(object) then
+                        foundWorld = object
+                    end
+
+                    if not foundStateFn then
+                        local candidateFn = safeRaw(object, "state")
+                        if readState(candidateFn) then
+                            foundStateFn = candidateFn
+                        end
+                    end
+
+                    if foundWorld and foundStateFn then
+                        break
                     end
                 end
             end
 
-            if #candidates == 0 then
-                return false, "Tidak ada kandidat World valid 100x60 dengan layer FG/BG terbaca"
+            if foundWorld then refs.world = foundWorld end
+            if foundStateFn then refs.stateFn = foundStateFn end
+
+            if not refs.world or not refs.stateFn then
+                return false,
+                    "Referensi belum lengkap: world="
+                    .. tostring(refs.world ~= nil)
+                    .. ", playerState="
+                    .. tostring(refs.stateFn ~= nil)
             end
 
-            -- Pilih kandidat dengan cakupan baris dan data numerik paling lengkap.
-            table.sort(candidates, function(a, b)
-                if a.validRows ~= b.validRows then
-                    return a.validRows > b.validRows
-                end
-                if a.numericCells ~= b.numericCells then
-                    return a.numericCells > b.numericCells
-                end
-                return a.nonZeroCells > b.nonZeroCells
-            end)
+            return true, "World dan playerState ditemukan"
+        end
 
-            local chosen = candidates[1]
-            worldRef = chosen.ref
-            worldMeta = {
-                candidateCount = #candidates,
-                validRows = chosen.validRows,
-                numericCells = chosen.numericCells,
-                nonZeroCells = chosen.nonZeroCells,
-            }
+        local function readTile(layer, x, y)
+            local world = refs.world
+            if not world then return nil end
+
+            local width = tonumber(safeRaw(world, "w"))
+            local height = tonumber(safeRaw(world, "h"))
+            if not width or not height
+                or x < 0 or y < 0 or x >= width or y >= height then
+                return nil
+            end
+
+            local layerTable = safeRaw(world, layer)
+            local row = type(layerTable) == "table" and safeRaw(layerTable, y)
+            if type(row) ~= "table" then return 0 end
+
+            local value = safeRaw(row, x)
+            if value == nil then return 0 end
+            return value
+        end
+
+        local function scanAbovePlayer()
+            if not refs.world or not refs.stateFn then
+                local ok, message = discoverRefs()
+                if not ok then
+                    return false, message
+                end
+            end
+
+            local state = readState(refs.stateFn)
+            if not state then
+                refs.stateFn = nil
+                return false, "Player state tidak terbaca; tekan SCAN lagi"
+            end
+
+            -- Formula tile player sama seperti main.lua:
+            -- X = floor(state.x), Y = floor(state.y - 0.475)
+            local playerX = math.floor(state.x)
+            local playerY = math.floor(state.y - 0.475)
+
+            -- Target adalah tepat satu tile di atas tile player.
+            local targetX = playerX
+            local targetY = playerY - 1
+
+            local fg = readTile("fg", targetX, targetY)
+            local bg = readTile("bg", targetX, targetY)
+
+            if fg == nil or bg == nil then
+                return false, ("Tile (%d,%d) di luar world / tidak terbaca")
+                    :format(targetX, targetY)
+            end
+
+            infoLabel.Text = string.format(
+                "Player State: X %.3f | Y %.3f\n"
+                .. "Player Tile: X %d | Y %d\n"
+                .. "1 Block Above: X %d | Y %d\n"
+                .. "FG ID: %s | BG ID: %s",
+                state.x, state.y,
+                playerX, playerY,
+                targetX, targetY,
+                tostring(fg), tostring(bg)
+            )
+
+            statusLabel.Text = "Status: scan berhasil"
+            statusLabel.TextColor3 = Theme.Green
             return true, string.format(
-                "World tervalidasi %dx%d | baris FG/BG: %d/%d | nilai numerik: %d | tile layer nonzero: %d | kandidat: %d",
-                chosen.width, chosen.height, chosen.validRows, EXPECTED_H,
-                chosen.numericCells, chosen.nonZeroCells, #candidates
+                "Tile (%d,%d) | FG=%s | BG=%s",
+                targetX, targetY, tostring(fg), tostring(bg)
             )
         end
-
-        -- Mengikuti indeks tile pada module utama: world[layer][y][x].
-        -- Koordinat X dan Y dimulai dari 0.
-        local function readTile(x, y)
-            local world = worldRef
-            if not world or x < 0 or y < 0
-                or x >= EXPECTED_W or y >= EXPECTED_H then
-                return nil, nil
-            end
-
-            local fgLayer = safeRaw(world, "fg")
-            local bgLayer = safeRaw(world, "bg")
-            local fgRow = type(fgLayer) == "table" and fgLayer[y] or nil
-            local bgRow = type(bgLayer) == "table" and bgLayer[y] or nil
-            if type(fgRow) ~= "table" or type(bgRow) ~= "table" then
-                return nil, nil
-            end
-
-            local fg = fgRow[x]
-            local bg = bgRow[x]
-            if fg == nil then fg = 0 end
-            if bg == nil then bg = 0 end
-            return fg, bg
-        end
-
-        local function writeClipboard(value)
-            value = tostring(value or "")
-            local writers = { setclipboard, toclipboard }
-            for _, writer in pairs(writers) do
-                if type(writer) == "function" then
-                    local ok, err = pcall(writer, value)
-                    if ok then return true end
-                    log("Clipboard API gagal:", err)
-                end
-            end
-            return false, "Executor tidak menyediakan setclipboard/toclipboard"
-        end
-
-        local function copySelectedTile()
-            if not worldRef then
-                setStatus("COPY TILE GAGAL: World belum di-scan")
-                return
-            end
-            if not selected then
-                setStatus("Pilih tile terlebih dahulu")
-                return
-            end
-
-            local fg, bg = readTile(selected.x, selected.y)
-            if fg == nil or bg == nil then
-                setStatus("COPY TILE GAGAL: data tile tidak terbaca")
-                return
-            end
-
-            local payload = string.format(
-                "WORLD TILE DATA\nworld_size=%dx%d\ncandidate_count=%d\nx=%d\ny=%d\nfg=%s\nbg=%s\n",
-                EXPECTED_W, EXPECTED_H,
-                worldMeta and worldMeta.candidateCount or 0,
-                selected.x, selected.y, tostring(fg), tostring(bg)
-            )
-            local ok, err = writeClipboard(payload)
-            if ok then
-                setStatus(string.format("Tile (%d,%d) disalin | FG=%s | BG=%s", selected.x, selected.y, tostring(fg), tostring(bg)))
-            else
-                setStatus("Clipboard tidak tersedia: " .. tostring(err))
-            end
-        end
-
-        local function copyEntireWorld()
-            if not worldRef then
-                setStatus("COPY WORLD GAGAL: World belum di-scan")
-                return
-            end
-
-            setStatus("Menyusun data 6.000 tile untuk clipboard...")
-            local lines = {
-                "# GROWBLOX WORLD SCAN",
-                "# width=" .. EXPECTED_W .. " height=" .. EXPECTED_H,
-                "# coordinate_origin=0,0",
-                "# layer_index=world[layer][y][x]",
-                "# candidate_count=" .. tostring(worldMeta and worldMeta.candidateCount or 0),
-                "# validated_rows=" .. tostring(worldMeta and worldMeta.validRows or 0),
-                "# numeric_layer_values=" .. tostring(worldMeta and worldMeta.numericCells or 0),
-                "# nonzero_layer_values=" .. tostring(worldMeta and worldMeta.nonZeroCells or 0),
-                "x,y,fg,bg",
-            }
-
-            for y = 0, EXPECTED_H - 1 do
-                for x = 0, EXPECTED_W - 1 do
-                    local fg, bg = readTile(x, y)
-                    if fg == nil or bg == nil then
-                        setStatus(string.format("COPY WORLD DIBATALKAN: row FG/BG tidak terbaca pada (%d,%d)", x, y))
-                        return
-                    end
-                    lines[#lines + 1] = string.format("%d,%d,%s,%s", x, y, tostring(fg), tostring(bg))
-                end
-                if y % 10 == 9 then task.wait() end
-                if not running then return end
-            end
-
-            local payload = table.concat(lines, "\n")
-            local ok, err = writeClipboard(payload)
-            if ok then
-                setStatus(string.format("SELURUH WORLD DISALIN: %d tile | %d karakter CSV", EXPECTED_W * EXPECTED_H, #payload))
-            else
-                setStatus("Clipboard tidak tersedia: " .. tostring(err))
-            end
-        end
-
-        local function tileColor(fg, bg)
-            local hasFG = tonumber(fg) ~= nil and tonumber(fg) ~= 0
-            local hasBG = tonumber(bg) ~= nil and tonumber(bg) ~= 0
-            if hasFG and hasBG then return Theme.Both end
-            if hasFG then return Theme.FG end
-            if hasBG then return Theme.BG end
-            return Theme.Empty
-        end
-
-        local function updateTileButton(x, y)
-            local row = tileButtons[y]
-            local button = row and row[x]
-            if not button or not button.Parent then return end
-
-            local fg, bg = readTile(x, y)
-            if fg == nil or bg == nil then
-                button.BackgroundColor3 = Theme.Empty
-                button.Text = "?"
-            else
-                button.BackgroundColor3 = tileColor(fg, bg)
-                button.Text = ""
-            end
-
-            if selected and selected.x == x and selected.y == y then
-                button.BorderSizePixel = 2
-                button.BorderColor3 = Theme.Selected
-            else
-                button.BorderSizePixel = 0
-            end
-        end
-
-        local function showTileInfo(x, y)
-            local fg, bg = readTile(x, y)
-            if fg == nil or bg == nil then
-                selected = { x = x, y = y }
-                selectedLabel.Text = string.format(
-                    "TILE X:%d Y:%d  |  FG: TIDAK TERBACA  |  BG: TIDAK TERBACA", x, y
-                )
-                updateTileButton(x, y)
-                setStatus("Data tile tidak terbaca pada koordinat tersebut")
-                return
-            end
-
-            local old = selected
-            selected = { x = x, y = y }
-            if old then updateTileButton(old.x, old.y) end
-            updateTileButton(x, y)
-
-            selectedLabel.Text = string.format(
-                "TILE X:%d Y:%d  |  FG ID: %s  |  BG ID: %s",
-                x, y, tostring(fg), tostring(bg)
-            )
-            setStatus(string.format("Tile (%d,%d) dipilih | FG=%s | BG=%s", x, y, tostring(fg), tostring(bg)))
-        end
-
-        local function buildGrid()
-            if gridBuilt or not running then return end
-            setStatus("Membuat 6.000 tile UI...")
-
-            for y = 0, EXPECTED_H - 1 do
-                tileButtons[y] = {}
-                for x = 0, EXPECTED_W - 1 do
-                    local tileX, tileY = x, y
-                    local button = create("TextButton", {
-                        Name = string.format("Tile_%d_%d", tileX, tileY),
-                        Size = UDim2.fromOffset(CELL_SIZE, CELL_SIZE),
-                        BackgroundColor3 = Theme.Empty,
-                        BorderSizePixel = 0,
-                        Text = "",
-                        TextColor3 = Theme.White,
-                        Font = Enum.Font.GothamBold,
-                        TextSize = 7,
-                        AutoButtonColor = true,
-                        LayoutOrder = tileY * EXPECTED_W + tileX + 1,
-                    }, mapScroll)
-                    tileButtons[tileY][tileX] = button
-                    track(button.Activated:Connect(function()
-                        if running then showTileInfo(tileX, tileY) end
-                    end))
-                end
-                if y % 5 == 4 then task.wait() end
-                if not running then return end
-            end
-
-            gridBuilt = true
-            setStatus("Grid 100x60 siap. Memuat data FG/BG...")
-        end
-
-        local function refreshMap()
-            if refreshing or not running then return end
-            if not worldRef then
-                setStatus("World belum ditemukan. Tekan SCAN WORLD.")
-                return
-            end
-            if not gridBuilt then
-                buildGrid()
-            end
-            if not gridBuilt then return end
-
-            refreshing = true
-            setStatus("Memperbarui data 6.000 tile...")
-            local count = 0
-            for y = 0, EXPECTED_H - 1 do
-                for x = 0, EXPECTED_W - 1 do
-                    updateTileButton(x, y)
-                    count += 1
-                end
-                if y % 3 == 2 then task.wait() end
-                if not running then
-                    refreshing = false
-                    return
-                end
-            end
-            refreshing = false
-            setStatus("Refresh selesai: 100x60 tile | 6.000 tile diperiksa")
-            if selected then showTileInfo(selected.x, selected.y) end
-        end
-
-        local function scanCycle()
-            if scanning or not running then return end
-            scanning = true
-            local found, message = false, "World belum ditemukan"
-            for attempt = 1, 30 do
-                if not running then break end
-                found, message = scanWorldOnce()
-                if found then break end
-                setStatus(string.format("Scan World %d/30 | %s", attempt, tostring(message)))
-                task.wait(0.5)
-            end
-            scanning = false
-
-            if found then
-                setStatus(message .. " | menyiapkan peta")
-                refreshMap()
-            else
-                setStatus("SCAN GAGAL: " .. tostring(message))
-            end
-        end
-
-        --==================================================
-        -- UI
-        --==================================================
-        create("UIListLayout", {
-            Padding = UDim.new(0, 7),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, page)
-
-        local header = makeButton("WORLD SCANNER - PLACED BLOCK", 36, page, Theme.PanelDark)
-        header.TextColor3 = Theme.Text
-        header.LayoutOrder = 1
-
-        local panel = create("Frame", {
-            Name = "WorldPlacedBlockScannerPanel",
-            Size = UDim2.new(1, 0, 0, 0),
-            AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundColor3 = Theme.Panel,
-            BorderSizePixel = 0,
-            LayoutOrder = 2,
-        }, page)
-        corner(panel, 8)
-        create("UIPadding", {
-            PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
-            PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
-        }, panel)
-        create("UIListLayout", {
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, panel)
-
-        statusLabel = makeLabel("STATUS: Menunggu scan world...", 34, panel)
-        statusLabel.LayoutOrder = 1
-
-        selectedLabel = makeLabel("TILE: belum dipilih | FG ID: - | BG ID: -", 38, panel)
-        selectedLabel.LayoutOrder = 2
-
-        local legend = create("Frame", {
-            Name = "WorldScannerLegend",
-            Size = UDim2.new(1, 0, 0, 24),
-            BackgroundTransparency = 1,
-            LayoutOrder = 3,
-        }, panel)
-        create("UIListLayout", {
-            FillDirection = Enum.FillDirection.Horizontal,
-            Padding = UDim.new(0, 10),
-            VerticalAlignment = Enum.VerticalAlignment.Center,
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, legend)
-
-        local function legendItem(label, color)
-            local item = create("Frame", {
-                Size = UDim2.fromOffset(76, 18),
-                BackgroundTransparency = 1,
-            }, legend)
-            create("Frame", {
-                Position = UDim2.fromOffset(0, 3),
-                Size = UDim2.fromOffset(12, 12),
-                BackgroundColor3 = color,
-                BorderSizePixel = 0,
-            }, item)
-            create("TextLabel", {
-                Position = UDim2.fromOffset(16, 0),
-                Size = UDim2.fromOffset(60, 18),
-                BackgroundTransparency = 1,
-                Text = label,
-                TextColor3 = Theme.Text,
-                Font = Enum.Font.Gotham,
-                TextSize = 9,
-                TextXAlignment = Enum.TextXAlignment.Left,
-            }, item)
-            return item
-        end
-
-        legendItem("Kosong", Theme.Empty)
-        legendItem("FG", Theme.FG)
-        legendItem("BG", Theme.BG)
-        legendItem("FG+BG", Theme.Both)
-
-        local actionRow = create("Frame", {
-            Name = "WorldScannerActions",
-            Size = UDim2.new(1, 0, 0, 34),
-            BackgroundTransparency = 1,
-            LayoutOrder = 4,
-        }, panel)
-        create("UIListLayout", {
-            FillDirection = Enum.FillDirection.Horizontal,
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, actionRow)
-
-        local scanButton = makeButton("SCAN WORLD", 32, actionRow, Theme.Accent)
-        scanButton.Size = UDim2.new(0.34, -4, 1, 0)
-        scanButton.LayoutOrder = 1
-        local refreshButton = makeButton("REFRESH MAP", 32, actionRow, Theme.Green)
-        refreshButton.Size = UDim2.new(0.33, -4, 1, 0)
-        refreshButton.LayoutOrder = 2
-        local clearButton = makeButton("CLEAR SELECT", 32, actionRow, Theme.PanelDark)
-        clearButton.TextColor3 = Theme.Text
-        clearButton.Size = UDim2.new(0.33, -4, 1, 0)
-        clearButton.LayoutOrder = 3
-
-        local copyRow = create("Frame", {
-            Name = "WorldScannerCopyActions",
-            Size = UDim2.new(1, 0, 0, 34),
-            BackgroundTransparency = 1,
-            LayoutOrder = 5,
-        }, panel)
-        create("UIListLayout", {
-            FillDirection = Enum.FillDirection.Horizontal,
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, copyRow)
-
-        local copyTileButton = makeButton("COPY TILE", 32, copyRow, Theme.Accent)
-        copyTileButton.Size = UDim2.new(0.34, -4, 1, 0)
-        copyTileButton.LayoutOrder = 1
-        local copyWorldButton = makeButton("COPY WORLD CSV", 32, copyRow, Theme.Green)
-        copyWorldButton.Size = UDim2.new(0.66, -2, 1, 0)
-        copyWorldButton.LayoutOrder = 2
-
-        mapScroll = create("ScrollingFrame", {
-            Name = "WorldScannerMapScroll",
-            Size = UDim2.new(1, 0, 0, 390),
-            BackgroundColor3 = Theme.Background,
-            BorderSizePixel = 0,
-            ScrollBarThickness = 8,
-            ScrollingDirection = Enum.ScrollingDirection.XY,
-            CanvasSize = UDim2.fromOffset(
-                EXPECTED_W * CELL_SIZE + (EXPECTED_W - 1) * CELL_GAP,
-                EXPECTED_H * CELL_SIZE + (EXPECTED_H - 1) * CELL_GAP
-            ),
-            LayoutOrder = 6,
-        }, panel)
-        corner(mapScroll, 5)
-
-        mapGrid = create("UIGridLayout", {
-            CellSize = UDim2.fromOffset(CELL_SIZE, CELL_SIZE),
-            CellPadding = UDim2.fromOffset(CELL_GAP, CELL_GAP),
-            FillDirection = Enum.FillDirection.Horizontal,
-            FillDirectionMaxCells = EXPECTED_W,
-            SortOrder = Enum.SortOrder.LayoutOrder,
-            StartCorner = Enum.StartCorner.TopLeft,
-        }, mapScroll)
-
-        track(header.Activated:Connect(function()
-            panel.Visible = not panel.Visible
-            header.Text = panel.Visible and "WORLD SCANNER - PLACED BLOCK  ▲"
-                or "WORLD SCANNER - PLACED BLOCK  ▼"
-        end))
 
         track(scanButton.Activated:Connect(function()
-            if refreshing then
-                setStatus("Tunggu refresh selesai sebelum scan ulang")
-                return
+            local ok, message = scanAbovePlayer()
+            statusLabel.Text = "Status: " .. tostring(message)
+            if not ok then statusLabel.TextColor3 = Theme.Red end
+            print("[SCAN ABOVE PLAYER]", message)
+        end))
+
+        track(liveButton.Activated:Connect(function()
+            live = not live
+            liveButton.Text = live and "LIVE SCAN: ON" or "LIVE SCAN: OFF"
+            liveButton.BackgroundColor3 = live and Theme.Green or Theme.PanelDark
+            liveButton.TextColor3 = live and Theme.White or Theme.Text
+
+            if live then
+                task.spawn(function()
+                    while live and not destroyed
+                        and not Hub.IsClosing()
+                        and page.Parent do
+                        local ok, message = scanAbovePlayer()
+                        if not ok then
+                            statusLabel.Text = "Status: " .. tostring(message)
+                            statusLabel.TextColor3 = Theme.Red
+                        end
+                        task.wait(0.2)
+                    end
+                end)
             end
-            worldRef = nil
-            task.spawn(scanCycle)
-        end))
-
-        track(refreshButton.Activated:Connect(function()
-            if not worldRef then
-                task.spawn(scanCycle)
-            else
-                task.spawn(refreshMap)
-            end
-        end))
-
-        track(copyTileButton.Activated:Connect(copySelectedTile))
-        track(copyWorldButton.Activated:Connect(function()
-            task.spawn(copyEntireWorld)
-        end))
-
-        track(clearButton.Activated:Connect(function()
-            local old = selected
-            selected = nil
-            if old then updateTileButton(old.x, old.y) end
-            selectedLabel.Text = "TILE: belum dipilih | FG ID: - | BG ID: -"
-            setStatus("Pilihan tile dibersihkan")
         end))
 
         local function cleanup()
-            if not running then return end
-            running = false
+            if destroyed then return end
+            destroyed = true
+            live = false
+
             for _, connection in ipairs(connections) do
-                pcall(function() connection:Disconnect() end)
+                pcall(function()
+                    connection:Disconnect()
+                end)
             end
             table.clear(connections)
-            table.clear(tileButtons)
-            worldRef = nil
-            worldMeta = nil
-            log("MODULE DITUTUP; seluruh koneksi UI diputus")
         end
 
         Hub.RegisterCleanup(cleanup)
-        setStatus("Module dimuat. Memulai scan world...")
-        task.spawn(scanCycle)
-        print("[WORLD SCANNER] Module loaded.")
+        print("[SCAN ABOVE PLAYER] Module loaded.")
     end)
 end
-
---==================================================
--- END MODULE: WORLD PLACED BLOCK SCANNER 
---==================================================
