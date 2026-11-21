@@ -416,14 +416,30 @@ return function(Hub)
 
             if direction == "UP" then
                 local inwardKey = corridorTileX == 0 and "right" or "left"
+                local oppositeKey = inwardKey == "left" and "right" or "left"
+
+                -- Pastikan player benar-benar berhenti di titik X sebelum mulai melompat.
+                releaseAll()
                 setStatus(string.format(
-                    "NAIK DARI X=%d | LOMPAT + GERAK %s",
-                    corridorTileX, string.upper(inwardKey)
+                    "SIAP NAIK | BERHENTI DI X=%d | MENYIAPKAN LOMPAT",
+                    corridorTileX
                 ))
+                task.wait(0.70)
+
+                -- Tahap 1: tahan JUMP selama total 0.7 detik.
                 setInput("down", false)
-                setInput(inwardKey == "left" and "right" or "left", false)
+                setInput(oppositeKey, false)
                 setInput("jump", true)
+                task.wait(0.20)
+
+                -- Tahap 2: setelah 0.2 detik jump ditahan,
+                -- tekan arah masuk sambil JUMP tetap ditahan.
+                setStatus(string.format(
+                    "JUMP + HOLD %s DARI X=%d",
+                    string.upper(inwardKey), corridorTileX
+                ))
                 setInput(inwardKey, true)
+                task.wait(0.50)
             else
                 setStatus(string.format(
                     "TURUN | MENUNGGU JATUH DARI TILE KOSONG X=%d",
@@ -433,6 +449,13 @@ return function(Hub)
                 setInput("left", false)
                 setInput("right", false)
                 setInput("down", false)
+            end
+
+            if direction == "UP" then
+                -- Lepas jump setelah fase hold, tetapi lanjutkan arah sebentar
+                -- agar momentum gerak ke dalam tetap terbawa.
+                setInput("jump", false)
+                task.wait(0.08)
             end
 
             local changed = false
