@@ -426,7 +426,7 @@ return function(Hub)
                 ))
                 task.wait(0.70)
 
-                -- JUMP total 0.4 detik.
+                -- Kembali ke kombinasi awal: JUMP total 0.7 detik.
                 -- Setelah 0.2 detik pertama, tekan arah masuk sambil tetap menahan JUMP.
                 setInput("down", false)
                 setInput(oppositeKey, false)
@@ -438,7 +438,7 @@ return function(Hub)
                     string.upper(inwardKey), corridorTileX
                 ))
                 setInput(inwardKey, true)
-                task.wait(0.20)
+                task.wait(0.50)
             else
                 setStatus(string.format(
                     "TURUN | MENUNGGU JATUH DARI TILE KOSONG X=%d",
@@ -451,12 +451,9 @@ return function(Hub)
             end
 
             if direction == "UP" then
-                -- Lepas JUMP setelah total 0.4 detik.
-                -- Tombol arah MASUK tetap ditahan terus, bukan tap-tap,
-                -- sampai perubahan baris Y benar-benar terdeteksi.
+                -- Lepas jump setelah fase hold, tetapi lanjutkan arah sebentar
+                -- agar momentum gerak ke dalam tetap terbawa.
                 setInput("jump", false)
-                setInput(oppositeKey, false)
-                setInput(inwardKey, true)
                 task.wait(0.08)
             end
 
@@ -479,11 +476,6 @@ return function(Hub)
                     or (direction == "DOWN" and nowRow > startRow) then
                     changed = true
                     break
-                end
-
-                if direction == "UP" then
-                    setInput(inwardKey, true)
-                    setInput(oppositeKey, false)
                 end
 
                 if os.clock() - startedAt > 3.5 then
