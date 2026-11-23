@@ -1539,6 +1539,43 @@ end
             return nil
         end
 
+        --==================================================
+        -- CATATAN PLAYER FACING (HASIL PENGUJIAN REAL-TIME)
+        --==================================================
+        -- SUMBER NILAI RAW:
+        --   PlayerState disimpan sebagai function pada moveRefs.stateFn.
+        --   Panggil function tersebut untuk memperoleh state terbaru:
+        --       local state = moveReadPlayerState(moveRefs.stateFn)
+        --       local facingRaw = state and state.facing
+        --
+        -- HASIL PENGUJIAN YANG SUDAH DIKONFIRMASI:
+        --       facingRaw ==  1  -> player menghadap KANAN
+        --       facingRaw == -1  -> player menghadap KIRI
+        --
+        -- PENERJEMAHAN NILAI (CONTOH KONSEPTUAL, BUKAN KODE AKTIF):
+        --       if facingRaw == 1 then
+        --           facingName = "KANAN"
+        --       elseif facingRaw == -1 then
+        --           facingName = "KIRI"
+        --       else
+        --           facingName = "TIDAK DIKENAL"
+        --       end
+        --
+        -- PEMBACAAN REAL-TIME:
+        --   Ambil state dengan memanggil moveRefs.stateFn kembali setiap kali
+        --   arah hadap perlu diperiksa. Jangan hanya memakai moveRefs.state
+        --   hasil scan awal karena nilai tersebut bisa menjadi data lama.
+        --
+        -- CATATAN UNTUK FITUR DROP DI MASA DEPAN:
+        --   Bandingkan posisi tile target dengan posisi player untuk
+        --   menentukan arah yang dibutuhkan. Sebelum drop, baca facingRaw
+        --   terbaru dan pastikan nilainya sesuai:
+        --       target di kanan -> facingRaw harus 1
+        --       target di kiri  -> facingRaw harus -1
+        --   Catatan ini hanya dokumentasi; belum ada koreksi arah maupun
+        --   pemanggilan drop yang ditambahkan pada module ini.
+        --==================================================
+
         local function moveReadPlayerState(fn)
             if type(fn) ~= "function" then return nil end
             local ok, value = pcall(fn)
