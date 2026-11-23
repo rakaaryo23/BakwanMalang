@@ -1,9 +1,11 @@
 --==================================================
 -- MAIN MODULE: MODUL FUNGSI UTAMA
--- Satu Hub.RegisterTab yang berisi dua panel/submodule:
+-- Satu Hub.RegisterTab dengan dua submodule aktif dan terpisah:
 -- 1) PUT + BREAK + COLLECT
--- 2) MOVEMENT
--- Semua penanda struktur di bawah ini adalah komentar saja.
+-- 2) DIRT FARM PATHFINDING (termasuk backend discovery + hook movement)
+-- Masing-masing memiliki state, event, dan cleanup dalam scope sendiri.
+-- Shared root hanya berisi service/configuration dan helper UI generik.
+-- Movement Testing dan Drop Selected Inventory hanya tersimpan sebagai arsip.
 --==================================================
 
 return function(Hub)
@@ -13,11 +15,41 @@ return function(Hub)
         --==================================================
         -- MAIN HUB TAB / ROOT CONTAINER
         -- Ini adalah satu-satunya Hub.RegisterTab pada file ini.
-        -- Panel PNB dan Movement di bawahnya bukan Hub tab terpisah.
+        -- Panel PNB dan Pathfinding di bawahnya bukan Hub tab terpisah.
         --==================================================
 
         --==================================================
-        -- [01] SHARED CONFIGURATION & STATE (PNB + MOVEMENT)
+        -- [01] ROOT SERVICES, CONFIGURATION & SHARED UI HELPERS
+        --==================================================
+        --
+        -- DEPENDENCY / IMPORT MAP:
+        -- Roblox services:
+        --   Players, ReplicatedStorage, UserInputService (khusus Pathfinding).
+        -- Hub API:
+        --   Hub.RegisterTab, Hub.RegisterCleanup, Hub.IsClosing.
+        -- Shared Luau/Roblox APIs:
+        --   Instance, task, pcall, type, pairs, ipairs, table, rawget,
+        --   typeof, os.clock, Color3, UDim, UDim2, Enum.
+        -- Executor/runtime capabilities yang diperlukan:
+        --   getgc(true)                 : discovery object/function runtime.
+        --   debug.info                  : nama dan jumlah parameter function PNB.
+        --   debug.getconstants/getconstants : validasi konstanta setTile/hit.
+        --   getgenv()                   : stop bridge Pathfinding (fallback _G).
+        -- Optional untuk fallback Auto Collect:
+        --   debug.getupvalues atau debug.getupvalue/getupvalue,
+        --   getconnections.
+        --
+        -- CATATAN HOOK:
+        -- Pathfinding tidak memakai hookfunction. Hook dilakukan dengan
+        -- mengganti field movementTable.isDown memakai wrapper, lalu restore
+        -- fungsi asli saat cleanup. Jangan memasang wrapper kedua pada field sama.
+        --
+        -- KETERGANTUNGAN GAME:
+        -- PNB: Inventory(slots/capacity/selected), World(fg/bg/w/h/spawn),
+        --      PlayerState.state, setTile, hit, serta dropList/dropTaken/
+        --      takeDrop atau WorldRemotes.TakeDrop untuk Auto Collect.
+        -- Pathfinding: World, PlayerState.state, Movement(isDown/spaceJumps/KEYS).
+        --
         --==================================================
 
         local Players = game:GetService("Players")
@@ -42,48 +74,11 @@ return function(Hub)
             Red = Color3.fromRGB(180, 65, 75),
         }
 
-        local running = false
-        local destroyed = false
-        local moveCleanup -- diisi oleh submenu MOVEMENT di bagian bawah.
-        local confirmedId = nil
 
-        local refs = {
-            Inv = nil,
-            World = nil,
-            State = nil,
-            SetTile = nil,
-            Hit = nil,
-        }
-
-        local enabled = { ["-1,-1"] = true, ["0,-1"] = true, ["1,-1"] = true }
-        local connections = {}
-        local popup = nil
-        local Drops = { list = nil, update = nil }
-        local DropFailUntil = {}
-        local WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
-        local TakeDropRemote = WorldRemotes and WorldRemotes:FindFirstChild("TakeDrop")
-
-        -- Forward declaration is IMPORTANT:
-        -- report() must reference this local, not a global nil.
-        local statusLabel
-        local selectedLabel
-        local tileButton
-
-        local function report(message)
-            message = tostring(message)
-            if statusLabel and statusLabel.Parent then
-                statusLabel.Text = "Status: " .. message
-            end
-            print("[APB+COLLECT]", message)
-        end
-
-        local function track(connection)
-            table.insert(connections, connection)
-            return connection
-        end
 
         --==================================================
         -- [02] SHARED UI HELPERS
+        -- Hanya helper UI generik; state runtime dideklarasikan per submodule.
         --==================================================
 
         local function create(className, properties, parent)
@@ -163,6 +158,58 @@ return function(Hub)
             }, row)
             corner(box, 6)
             return box
+        end
+
+        --==================================================
+        -- [03] SUBMODULE MAP
+        --   SUBMODULE 1: PUT + BREAK + COLLECT
+        --       discovery -> inventory/world helpers -> plan -> put/break
+        --       -> auto collect -> orchestrator -> UI events -> cleanup.
+        --   SUBMODULE 2: DIRT FARM PATHFINDING
+        --       discovery -> World/PlayerState/Movement -> hook isDown
+        --       -> state reader/input adapter -> path algorithm -> UI -> cleanup.
+        --   Archived only: Movement Testing UI, Drop Selected Inventory.
+        --==================================================
+        -- SUBMODULE 1 SCOPE: PUT + BREAK + COLLECT
+        -- State, discovery, proses, event, dan cleanup PNB terisolasi.
+        --==================================================
+        do
+            local running = false
+            local destroyed = false
+            local confirmedId = nil
+
+            local refs = {
+                Inv = nil,
+                World = nil,
+                State = nil,
+                SetTile = nil,
+                Hit = nil,
+            }
+
+            local enabled = { ["-1,-1"] = true, ["0,-1"] = true, ["1,-1"] = true }
+            local connections = {}
+            local popup = nil
+            local Drops = { list = nil, update = nil }
+            local DropFailUntil = {}
+            local WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
+            local TakeDropRemote = WorldRemotes and WorldRemotes:FindFirstChild("TakeDrop")
+
+        -- Forward declaration: report() memakai statusLabel lokal submodule ini.
+            local statusLabel
+            local selectedLabel
+            local tileButton
+
+            local function report(message)
+            message = tostring(message)
+            if statusLabel and statusLabel.Parent then
+                statusLabel.Text = "Status: " .. message
+            end
+            print("[APB+COLLECT]", message)
+        end
+
+            local function track(connection)
+            table.insert(connections, connection)
+            return connection
         end
 
         --==================================================
@@ -1395,6 +1442,7 @@ end
 
         --==================================================
         -- [14] SUBMODULE 1: PUT + BREAK + COLLECT | CLEANUP
+        -- Hanya menghentikan worker, popup, dan koneksi milik PNB.
         --==================================================
 
         local function cleanup()
@@ -1404,10 +1452,6 @@ end
             running = false
             closePopup()
 
-            if moveCleanup then
-                pcall(moveCleanup)
-            end
-
             for _, connection in ipairs(connections) do
                 pcall(function()
                     connection:Disconnect()
@@ -1416,19 +1460,26 @@ end
             table.clear(connections)
         end
 
+        -- PNB mendaftarkan cleanup sendiri; tidak mematikan Pathfinding.
         Hub.RegisterCleanup(cleanup)
         print("[APB+COLLECT] PUT + BREAK + COLLECT submenu loaded.")
+        end -- SUBMODULE 1: PUT + BREAK + COLLECT scope
 
 
+
         --==================================================
+        -- SUBMODULE 2 SCOPE: DIRT FARM PATHFINDING
+        -- Discovery, hook movement, navigasi, event, dan cleanup berada
+        -- dalam satu scope. PNB tidak bergantung pada backend ini.
         --==================================================
-        -- SUBMODULE 2: MOVEMENT
-        -- Logic scan/state/hook/input, UI panel, reconnect, watchdog.
+        do
+            local moveCleanup -- cleanup hook/input milik Pathfinding.
+            local pathSetStatus -- forward declaration for backend status updates.
         --==================================================
-        -- [15] SUBMODULE 2: MOVEMENT | CONTROLLER
-        -- Diintegrasikan sebagai submenu kedua setelah PUT + BREAK + COLLECT.
-        -- Logic scan, state reader, hook, virtual input, dan reconnect manual
-        -- mengikuti script standalone MOVEMENT yang diberikan.
+        -- PATHFINDING INTERNAL BACKEND
+        -- Backend discovery World/PlayerState/Movement, hook isDown,
+        -- state reader, input virtual, dan restore hook milik Pathfinding.
+        -- [15] PATHFINDING BACKEND | DISCOVERY + STATE + HOOK
         --==================================================
 
         local moveENV = (type(getgenv) == "function" and getgenv()) or _G
@@ -1462,10 +1513,7 @@ end
             down = false,
         }
 
-        local moveButtons = {}
-        local moveHeld = { left = {}, right = {}, jump = {}, down = {} }
         local moveConnections = {}
-        local moveStatusLabel
 
         local function moveTrack(connection)
             table.insert(moveConnections, connection)
@@ -1473,36 +1521,14 @@ end
         end
 
         local function moveLog(...)
-            print("[GB AUTO MOVEMENT]", ...)
+            print("[GB PATHFINDING BACKEND]", ...)
         end
 
         local function moveSetStatus(message)
             moveLastError = tostring(message or "-")
-            if moveStatusLabel and moveStatusLabel.Parent then
-                local player = moveRefs.player or Players.LocalPlayer
-                local account = player and player.Name or "belum tersedia"
-                local worldText = moveRefs.world
-                    and (tostring(moveRefs.world.w) .. "x" .. tostring(moveRefs.world.h))
-                    or "belum"
-                local stateText = "belum"
-                if moveRefs.state then
-                    stateText = string.format(
-                        "X %.2f | Y %.2f | VX %.2f | VY %.2f",
-                        moveRefs.state.x or 0,
-                        moveRefs.state.y or 0,
-                        moveRefs.state.vx or 0,
-                        moveRefs.state.vy or 0
-                    )
-                end
-                moveStatusLabel.Text = string.format(
-                    "AKUN: %s\nWORLD: %s | STATE: %s\nMOVEMENT: %s\nSCAN: %d | %s",
-                    tostring(account),
-                    tostring(worldText),
-                    tostring(stateText),
-                    moveConnected and "TERHUBUNG" or "MENCARI / TERPUTUS",
-                    moveScanCount,
-                    moveLastError
-                )
+            moveLog("STATUS:", moveLastError)
+            if type(pathSetStatus) == "function" then
+                pathSetStatus("MOVEMENT BACKEND: " .. moveLastError)
             end
         end
 
@@ -1565,7 +1591,17 @@ end
             return objects
         end
 
-        -- Scan ulang dari awal: world, player state, dan movement table.
+        -- DISCOVERY MOVEMENT:
+        -- moveGetGC() mengambil snapshot objek Lua aktif dengan getgc(true).
+        -- moveScanFromZero() memeriksa setiap tabel untuk tiga komponen:
+        --   WORLD: fg/bg berupa tabel, w/h berupa angka, dan spawn tersedia.
+        --   PLAYER STATE: field state berisi function yang saat dipanggil
+        --     mengembalikan tabel dengan x, y, facing, vx (active tidak false).
+        --   MOVEMENT TABLE: memiliki isDown function, spaceJumps function,
+        --     dan KEYS dengan keyJump/keyLeft/keyRight/keyDown pada indeks
+        --     yang diharapkan.
+        -- Referensi yang lolos validasi disimpan ke moveRefs. Ini adalah
+        -- pengambilan referensi dari objek runtime, bukan pemanggilan gerak.
         local function moveScanFromZero()
             moveScanCount += 1
             local objects, gcError = moveGetGC()
@@ -1641,19 +1677,18 @@ end
         local function moveReleaseAll()
             for key in pairs(moveInput) do
                 moveInput[key] = false
-                moveHeld[key] = {}
-                local button = moveButtons[key]
-                if button and button.Parent then
-                    button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-                end
             end
         end
 
-        local function moveAnyVirtualInput()
-            return moveInput.left or moveInput.right
-                or moveInput.jump or moveInput.down
-        end
 
+        -- PEMBUNGKUS HOOK:
+        -- moveBuildWrapper(original) membuat fungsi pengganti untuk isDown.
+        -- Saat game bertanya apakah suatu tombol ditekan, wrapper:
+        --   1. Memanggil fungsi isDown asli dengan argumen yang sama.
+        --   2. Menyimpan hasil input fisik (keyboard/game input asli).
+        --   3. Untuk keyLeft/keyRight/keyJump/keyDown, menggabungkan hasil
+        --      fisik dengan flag moveInput yang diisi Pathfinding.
+        -- Dengan OR, input virtual menambah input fisik, bukan mematikannya.
         local function moveBuildWrapper(original)
             return function(saved, key, ...)
                 -- Fungsi asli selalu dipanggil agar keyboard fisik tetap bekerja.
@@ -1692,6 +1727,13 @@ end
             moveConnected = false
         end
 
+        -- PEMASANGAN HOOK:
+        -- moveInstallHook() mengambil moveRefs.movement.isDown sebagai fungsi
+        -- asli, membuat wrapper, lalu mengganti field module.isDown.
+        -- Setelah assignment, fungsi memeriksa ulang bahwa field benar-benar
+        -- berisi wrapper. Referensi original dan wrapper disimpan agar hook
+        -- dapat dikenali dan dipulihkan. Fungsi ini tidak memanggil gerakan
+        -- secara langsung; ia mengubah jalur pembacaan status tombol.
         local function moveInstallHook()
             local module = moveRefs.movement
             if not moveValidMovementTable(module) then
@@ -1724,6 +1766,10 @@ end
             return true, "isDown berhasil di-hook"
         end
 
+        -- SIKLUS CONNECT:
+        -- moveConnectCycle() mengulang scan hingga 30 kali dengan jeda 0,5 s.
+        -- Jika World + PlayerState + Movement table ditemukan, ia memasang
+        -- hook isDown. Pathfinding menunggu moveConnected=true sebelum GO.
         local function moveConnectCycle()
             if moveScanning or not moveRunning then return end
             moveScanning = true
@@ -1759,153 +1805,24 @@ end
             else
                 moveConnected = false
                 moveSetStatus("Belum tersambung: " .. tostring(message))
-                warn("[GB AUTO MOVEMENT] Scan belum berhasil: " .. tostring(message))
+                warn("[GB PATHFINDING BACKEND] Scan belum berhasil: " .. tostring(message))
             end
         end
 
         local function moveSetInput(key, value)
             if not moveRunning then return end
+            if moveInput[key] == nil then return end
             moveInput[key] = value == true
-            local button = moveButtons[key]
-            if button and button.Parent then
-                button.BackgroundColor3 = moveInput[key]
-                    and Color3.fromRGB(35, 135, 90)
-                    or Color3.fromRGB(45, 45, 55)
-            end
         end
 
-        -- [15A] MOVEMENT | VIRTUAL BUTTON UI HELPER
-        local function moveMakeButton(parent, key, label, xScale)
-            local button = create("TextButton", {
-                Name = "GB_" .. key,
-                Size = UDim2.new(0.24, -5, 0, 48),
-                Position = UDim2.new(xScale, 0, 0, 0),
-                BackgroundColor3 = Color3.fromRGB(45, 45, 55),
-                BorderSizePixel = 0,
-                Text = label,
-                TextColor3 = Theme.White,
-                TextSize = 12,
-                Font = Enum.Font.GothamBold,
-                AutoButtonColor = false,
-                Active = true,
-            }, parent)
-            corner(button, 8)
-            moveButtons[key] = button
 
-            moveTrack(button.InputBegan:Connect(function(obj)
-                if obj.UserInputType == Enum.UserInputType.Touch
-                    or obj.UserInputType == Enum.UserInputType.MouseButton1 then
-                    moveHeld[key][obj] = true
-                    moveSetInput(key, true)
-                end
-            end))
-            return button
-        end
-
-        -- [15B] MOVEMENT | EXPAND/COLLAPSE PANEL + UI LAYOUT
-        -- Header MOVEMENT adalah expand/collapse baris kedua pada halaman ini.
-        local moveToggle = makeButton(
-            "MOVEMENT - MANUAL SCAN  ▼", 36, page, Theme.PanelDark
-        )
-        moveToggle.Name = "MovementExpandToggle"
-        moveToggle.LayoutOrder = 3
-        moveToggle.TextColor3 = Theme.Text
-        moveToggle.TextSize = 11
-
-        local movePanel = create("Frame", {
-            Name = "MovementControllerPanel",
-            Size = UDim2.new(1, 0, 0, 0),
-            AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundColor3 = Theme.Panel,
-            BorderSizePixel = 0,
-            Visible = false,
-            LayoutOrder = 4,
-        }, page)
-        corner(movePanel, 8)
-
-        create("UIPadding", {
-            PaddingTop = UDim.new(0, 8),
-            PaddingBottom = UDim.new(0, 8),
-            PaddingLeft = UDim.new(0, 8),
-            PaddingRight = UDim.new(0, 8),
-        }, movePanel)
-
-        create("UIListLayout", {
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-        }, movePanel)
-
-        moveStatusLabel = create("TextLabel", {
-            Name = "MovementStatus",
-            Size = UDim2.new(1, 0, 0, 78),
-            BackgroundColor3 = Theme.Background,
-            BorderSizePixel = 0,
-            TextColor3 = Theme.Text,
-            TextSize = 10,
-            Font = Enum.Font.Code,
-            TextWrapped = true,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextYAlignment = Enum.TextYAlignment.Top,
-            LayoutOrder = 1,
-        }, movePanel)
-        corner(moveStatusLabel, 6)
-
-        local moveButtonRow = create("Frame", {
-            Name = "MovementInputButtons",
-            Size = UDim2.new(1, 0, 0, 48),
-            BackgroundTransparency = 1,
-            LayoutOrder = 2,
-        }, movePanel)
-
-        moveMakeButton(moveButtonRow, "left", "KIRI", 0)
-        moveMakeButton(moveButtonRow, "right", "KANAN", 0.25)
-        moveMakeButton(moveButtonRow, "jump", "JUMP", 0.50)
-        moveMakeButton(moveButtonRow, "down", "TURUN", 0.75)
-
-        local moveActionRow = create("Frame", {
-            Name = "MovementActions",
-            Size = UDim2.new(1, 0, 0, 32),
-            BackgroundTransparency = 1,
-            LayoutOrder = 3,
-        }, movePanel)
-
-        local moveReconnect = makeButton(
-            "SCAN / CONNECT ULANG", 30, moveActionRow, Theme.Accent
-        )
-        moveReconnect.Name = "MovementReconnect"
-        moveReconnect.Size = UDim2.new(1, 0, 0, 30)
-        moveReconnect.Position = UDim2.fromOffset(0, 0)
-        moveReconnect.TextSize = 10
-
-        -- [15C] MOVEMENT | UI EVENTS + INPUT EVENTS
-        moveTrack(moveToggle.Activated:Connect(function()
-            movePanel.Visible = not movePanel.Visible
-            moveToggle.Text = movePanel.Visible
-                and "MOVEMENT - MANUAL SCAN  ▲"
-                or "MOVEMENT - MANUAL SCAN  ▼"
-        end))
-
-        moveTrack(moveReconnect.Activated:Connect(function()
-            if moveConnected then
-                moveUnhookOld()
-            end
-            moveReleaseAll()
-            task.spawn(moveConnectCycle)
-        end))
-
-        -- Lepas input virtual saat jari dilepas di luar tombol.
-        moveTrack(UIS.InputEnded:Connect(function(obj)
-            for key, map in pairs(moveHeld) do
-                if map[obj] then
-                    map[obj] = nil
-                    moveSetInput(key, next(map) ~= nil)
-                end
-            end
-        end))
-
-        pcall(function()
-            moveTrack(UIS.WindowFocusReleased:Connect(moveReleaseAll))
-        end)
+        -- BACKEND MOVEMENT | LIFECYCLE TANPA PANEL TESTING
+        -- Input virtual hanya diset oleh Pathfinding melalui moveSetInput().
+        -- Tidak ada tombol Movement yang dibuat pada UI.
+        --
+        -- WindowFocusReleased dan CharacterRemoving melepas seluruh flag
+        -- input agar tombol virtual tidak tertahan saat fokus/karakter hilang.
+        moveTrack(UIS.WindowFocusReleased:Connect(moveReleaseAll))
 
         if LocalPlayer then
             moveTrack(LocalPlayer.CharacterAdded:Connect(function()
@@ -1919,7 +1836,8 @@ end
             end))
         end
 
-        -- [15D] MOVEMENT | CLEANUP / RESTORE HOOK
+        -- Cleanup backend: hentikan scan, lepaskan input, pulihkan isDown asli,
+        -- putus semua koneksi, dan hapus global stop bridge.
         moveCleanup = function()
             if not moveRunning then return end
             moveRunning = false
@@ -1936,29 +1854,38 @@ end
             if moveENV.GB_MOVEMENT_STOP == moveCleanup then
                 moveENV.GB_MOVEMENT_STOP = nil
             end
-            moveLog("CONTROLLER DIHENTIKAN DAN HOOK DIPULIHKAN")
+            moveLog("BACKEND MOVEMENT DIHENTIKAN DAN HOOK DIPULIHKAN")
         end
 
         moveENV.GB_MOVEMENT_STOP = moveCleanup
 
-        -- [15E] MOVEMENT | INITIAL SCAN
-        -- Scan otomatis hanya sekali saat modul dimuat.
-        -- Jika hook terputus setelahnya, pengguna menekan SCAN / CONNECT ULANG.
-        moveSetStatus("Controller dibuat; mulai scan dari nol...")
-        moveLog("MEMULAI SCAN DARI NOL")
+        -- Scan awal dipertahankan agar Pathfinding dapat langsung memakai
+        -- backend setelah referensi game tersedia. Scan ulang juga tersedia
+        -- dari tombol SCAN / CONNECT ULANG milik panel Pathfinding.
+        moveLog("BACKEND MOVEMENT: MEMULAI SCAN DARI NOL")
         moveLog("ACCOUNT:", LocalPlayer and LocalPlayer.Name or "tidak tersedia")
         moveLog("USER ID:", LocalPlayer and LocalPlayer.UserId or "tidak tersedia")
         task.spawn(moveConnectCycle)
 
-        print("[GB AUTO MOVEMENT] MOVEMENT submenu loaded.")
+        print("[GB PATHFINDING BACKEND] Internal backend loaded.")
 
         --==================================================
-        -- [16] SUBMODULE 3: DIRT FARM PATHFINDING
-        -- Menggunakan controller MOVEMENT yang sudah ada.
-        -- Tidak memasang hook isDown kedua agar tidak bentrok.
+        -- [16] SUBMODULE 2: DIRT FARM PATHFINDING
+        -- Discovery dan hook movement berada di scope Pathfinding.
+        -- Satu hook isDown dipasang/dipulihkan oleh lifecycle Pathfinding.
         --==================================================
 
-        do
+            -- RINGKASAN LOGIKA PATHFINDING:
+            -- 1. LOCK menyimpan koordinat state.x/state.y saat ini sebagai target.
+            -- 2. GO membaca state aktual dan mengubah posisi Y menjadi baris tile.
+            -- 3. Jika baris berbeda, pathCrossOneFarmRow() mencari koridor tile
+            --    kosong FG=0 dan BG=0 pada baris berikutnya.
+            -- 4. Player diarahkan ke koridor, lalu input JUMP/DOWN dipakai untuk
+            --    melewati satu baris farm sesuai arah tujuan.
+            -- 5. Jika sudah satu baris dengan target, gerak horizontal dikoreksi.
+            -- 6. Tujuan dianggap tercapai setelah toleransi X/Y terpenuhi dan
+            --    posisi stabil selama 0,5 detik.
+            -- STOP/focus hilang/karakter hilang melepas seluruh input.
             local pathRunning = true
             local pathGoRunning = false
             local pathStopRequested = false
@@ -1979,7 +1906,7 @@ end
             local pathPositionLabel
             local pathDirectionLabel
 
-            local function pathSetStatus(message)
+            pathSetStatus = function(message)
                 message = tostring(message or "-")
                 if pathStatusLabel and pathStatusLabel.Parent then
                     pathStatusLabel.Text = "STATUS: " .. message
@@ -1987,6 +1914,11 @@ end
                 pathLog(message)
             end
 
+            -- ADAPTER INPUT PATHFINDING -> MOVEMENT BACKEND:
+            -- Pathfinding tidak memanggil game movement function secara langsung.
+            -- Ia mengubah moveInput melalui moveSetInput(); wrapper isDown yang
+            -- sudah terpasang akan membaca flag tersebut saat game meminta
+            -- status keyLeft/keyRight/keyJump/keyDown.
             local function pathSetInput(key, value)
                 if not pathRunning then return end
                 moveSetInput(key, value)
@@ -2011,6 +1943,9 @@ end
                 end
             end
 
+            -- STATE READER PATHFINDING:
+            -- Memanggil fungsi stateFn yang ditemukan backend, memvalidasi
+            -- hasilnya, lalu memperbarui cache moveRefs.state.
             local function pathCurrentState()
                 local state = moveReadPlayerState(moveRefs.stateFn)
                 if state then moveRefs.state = state end
@@ -2287,6 +2222,11 @@ end
                 return false, "GO dihentikan"
             end
 
+            -- ORKESTRATOR PATHFINDING:
+            -- Membandingkan baris player dan target, memilih lintasan baris
+            -- melalui tile kosong, lalu mengoreksi posisi horizontal.
+            -- Semua perintah arah masuk melalui pathSetInput() -> moveInput
+            -- -> wrapper isDown. State aktual selalu dibaca ulang dari stateFn.
             local function pathNavigateToLocked()
                 if not pathLockedTarget then
                     pathSetStatus(
@@ -2556,8 +2496,9 @@ end
                 pathRunning = false
                 pathStopRequested = true
                 pathGoRunning = false
-                for _, key in ipairs({"left", "right", "jump", "down"}) do
-                    moveInput[key] = false
+                moveReleaseAll()
+                if moveCleanup then
+                    pcall(moveCleanup)
                 end
                 for _, connection in ipairs(pathConnections) do
                     pcall(function() connection:Disconnect() end)
@@ -2566,183 +2507,131 @@ end
                 pathLog("SUBMODULE DITUTUP; INPUT PATHFINDER DILEPAS")
             end
 
+            -- Pathfinding cleanup juga memulihkan hook backend miliknya.
             Hub.RegisterCleanup(pathCleanup)
-            pathSetStatus(
-                "Submodule dimuat. Menggunakan koneksi MOVEMENT dari modul utama."
-            )
+            if moveConnected then
+                pathSetStatus("MOVEMENT BACKEND TERHUBUNG. PATHFINDING SIAP.")
+            else
+                pathSetStatus(
+                    "Pathfinding dimuat. Menunggu backend movement internal terhubung."
+                )
+            end
             pathLog("Submodule loaded.")
-        end
+        end -- SUBMODULE 2: DIRT FARM PATHFINDING scope
 
         --==================================================
-        -- [17] SUBMODULE 4: DROP SELECTED INVENTORY
-        -- Mengambil item yang sedang dipilih di inventory saat tombol ditekan.
-        -- Tidak melakukan scan daftar item, tidak membuat pilihan tambahan,
-        -- dan hanya memanggil HUD.onDrop satu kali.
+        -- [17] ARSIP FITUR NONAKTIF: MOVEMENT TESTING
+        -- UI testing/tombol manual dihapus; backend hook tetap dipakai Pathfinding.
         --==================================================
-        do
-            local dropAlive = true
-            local dropConnections = {}
-
-            local function dropTrack(connection)
-                dropConnections[#dropConnections + 1] = connection
-                return connection
-            end
-
-            local dropToggle = makeButton(
-                "DROP SELECTED INVENTORY  ▼", 34, page, Theme.Accent
-            )
-            dropToggle.Name = "DropSelectedInventoryExpandToggle"
-            dropToggle.LayoutOrder = 7
-
-            local dropPanel = create("Frame", {
-                Name = "DropSelectedInventoryPanel",
-                Size = UDim2.new(1, 0, 0, 0),
-                AutomaticSize = Enum.AutomaticSize.Y,
-                BackgroundColor3 = Theme.Panel,
-                BorderSizePixel = 0,
-                Visible = false,
-                LayoutOrder = 8,
-            }, page)
-            corner(dropPanel, 8)
-
-            create("UIPadding", {
-                PaddingTop = UDim.new(0, 8),
-                PaddingBottom = UDim.new(0, 8),
-                PaddingLeft = UDim.new(0, 8),
-                PaddingRight = UDim.new(0, 8),
-            }, dropPanel)
-
-            create("UIListLayout", {
-                Padding = UDim.new(0, 6),
-                SortOrder = Enum.SortOrder.LayoutOrder,
-            }, dropPanel)
-
-            local dropButton = makeButton(
-                "DROP ITEM YANG SEDANG DIPILIH", 36, dropPanel, Theme.PanelDark
-            )
-            dropButton.Name = "DropCurrentSelectedInventoryButton"
-            dropButton.TextColor3 = Theme.Text
-            dropButton.LayoutOrder = 1
-
-            dropTrack(dropToggle.Activated:Connect(function()
-                dropPanel.Visible = not dropPanel.Visible
-                dropToggle.Text = dropPanel.Visible
-                    and "DROP SELECTED INVENTORY  ▲"
-                    or "DROP SELECTED INVENTORY  ▼"
-            end))
-
-            dropTrack(dropButton.Activated:Connect(function()
-                if not dropAlive or destroyed then return end
-
-                if type(getgc) ~= "function" then
-                    print("[GB DROP INVENTORY] Executor tidak menyediakan getgc.")
-                    return
-                end
-
-                -- Jangan memakai refs.Inv dari discovery modul utama:
-                -- discovery tersebut memilih kandidat inventory generik, yang
-                -- belum tentu objek Inventory game yang memiliki field selected.
-                -- Ambil objek Inventory aktif langsung saat tombol ditekan.
-                local ok, objects = pcall(getgc, true)
-                if not ok or type(objects) ~= "table" then
-                    print("[GB DROP INVENTORY] Gagal membaca objek game: " .. tostring(objects))
-                    return
-                end
-
-                local liveInventory
-                for _, object in ipairs(objects) do
-                    if type(object) == "table" then
-                        local slots = raw(object, "slots")
-                        local capacity = raw(object, "capacity")
-                        local selected
-                        pcall(function()
-                            selected = tonumber(object.selected)
-                        end)
-
-                        if type(slots) == "table"
-                            and type(capacity) == "number"
-                            and selected and selected > 0 then
-                            liveInventory = object
-                            break
-                        end
-                    end
-                end
-
-                if not liveInventory then
-                    print("[GB DROP INVENTORY] Objek inventory aktif / selected tidak ditemukan.")
-                    return
-                end
-
-                local id
-                pcall(function()
-                    id = tonumber(liveInventory.selected)
-                end)
-                if not id or id <= 0 then
-                    print("[GB DROP INVENTORY] Tidak ada item yang sedang dipilih.")
-                    return
-                end
-                id = math.floor(id)
-
-                local amount = 0
-                local slots = raw(liveInventory, "slots")
-                for _, slot in pairs(slots) do
-                    if type(slot) == "table"
-                        and tonumber(raw(slot, "id")) == id then
-                        amount += tonumber(raw(slot, "n")) or 0
-                    end
-                end
-                if amount <= 0 then
-                    print(("[GB DROP INVENTORY] Item ID %d tidak ada di inventory."):format(id))
-                    return
-                end
-
-                -- Cari fungsi HUD.onDrop pada saat tombol ditekan.
-                local onDrop
-                for _, object in ipairs(objects) do
-                    if type(object) == "table"
-                        and type(raw(object, "punchRange")) == "function"
-                        and type(raw(object, "handPower")) == "function" then
-                        local candidate = raw(object, "onDrop")
-                        if type(candidate) == "function" then
-                            onDrop = candidate
-                            break
-                        end
-                    end
-                end
-
-                if not onDrop then
-                    print("[GB DROP INVENTORY] Fungsi HUD.onDrop tidak ditemukan.")
-                    return
-                end
-
-                -- Satu pemanggilan saja, tanpa loop/retry/batch.
-                local dropOk, dropError = pcall(onDrop, id, amount)
-                if dropOk then
-                    print(("[GB DROP INVENTORY] Perintah drop dikirim: ID %d | JUMLAH %d"):format(
-                        id, amount
-                    ))
-                else
-                    print("[GB DROP INVENTORY] onDrop error: " .. tostring(dropError))
-                end
-            end))
-
-            local function dropCleanup()
-                if not dropAlive then return end
-                dropAlive = false
-                for _, connection in ipairs(dropConnections) do
-                    pcall(function() connection:Disconnect() end)
-                end
-                table.clear(dropConnections)
-            end
-
-            Hub.RegisterCleanup(dropCleanup)
-            print("[GB DROP INVENTORY] Submodule loaded.")
-        end
-
+        --
+        -- TUJUAN SUBMODULE LAMA:
+        -- Menampilkan status akun/world/player state, menyediakan tombol
+        -- KIRI/KANAN/JUMP/TURUN, serta tombol scan/connect ulang untuk menguji hook.
+        --
+        -- KOMPONEN YANG DITEMUKAN:
+        -- 1. getgc(true): daftar objek runtime.
+        -- 2. Movement table:
+        --      isDown      = function
+        --      spaceJumps  = function
+        --      KEYS        = table
+        -- 3. KEYS:
+        --      [2][1] = "keyJump"
+        --      [3][1] = "keyLeft"
+        --      [4][1] = "keyRight"
+        --      [5][1] = "keyDown"
+        -- 4. PlayerState: object.state function mengembalikan x, y, facing, vx.
+        -- 5. World: tabel dengan fg, bg, w, h, dan spawn.
+        --
+        -- CARA HOOK:
+        -- moveScanFromZero() mencari World, PlayerState, dan Movement table.
+        -- moveInstallHook() menyimpan isDown asli, membuat wrapper, lalu
+        -- mengganti movementTable.isDown dengan wrapper tersebut.
+        -- Wrapper tetap memanggil fungsi asli dan menggabungkan hasil input
+        -- fisik dengan flag virtual untuk keyLeft/keyRight/keyJump/keyDown.
+        --
+        -- INPUT VIRTUAL:
+        -- UI lama mengubah moveInput melalui moveSetInput().
+        -- Sekarang Pathfinding menjadi satu-satunya pemakai moveSetInput().
+        -- Alur: pathSetInput -> moveSetInput -> moveInput -> wrapper isDown.
+        --
+        -- PEMULIHAN:
+        -- moveUnhookOld() mengembalikan isDown asli hanya jika field masih
+        -- berisi wrapper milik script ini. moveCleanup() melepas input,
+        -- memulihkan hook, dan memutus koneksi backend.
+        --
+        --==================================================
+        --==================================================
+        -- [18] ARSIP FITUR NONAKTIF: DROP SELECTED INVENTORY
+        -- SUBMODULE AKTIF DIHAPUS; BAGIAN INI HANYA CATATAN PENGEMBANGAN.
+        --==================================================
+        --
+        -- TUJUAN FITUR LAMA:
+        -- Mengambil item yang sedang dipilih pada Inventory, menghitung total
+        -- jumlah item tersebut, lalu memanggil HUD.onDrop(id, amount) satu kali.
+        --
+        -- URUTAN PENGAMBILAN FUNGSI / DATA:
+        -- 1. getgc(true)
+        --    Mengambil daftar objek runtime yang sedang aktif. Hasilnya berupa
+        --    tabel `objects` yang dipakai untuk mencari Inventory dan HUD.
+        --
+        -- 2. OBJEK INVENTORY AKTIF (`liveInventory`)
+        --    Kandidat dicari sebagai tabel yang memiliki:
+        --      - slots: tabel slot inventory.
+        --      - capacity: angka kapasitas inventory.
+        --      - selected: ID item terpilih dengan nilai > 0.
+        --    Catatan: kode lama sengaja mencari ulang Inventory saat tombol
+        --    ditekan, bukan memakai refs.Inv hasil discovery PNB, karena
+        --    kandidat Inventory generik PNB belum tentu memiliki selected
+        --    yang sesuai dengan inventory aktif.
+        --
+        -- 3. ID ITEM TERPILIH (`id`)
+        --    Dibaca dari liveInventory.selected, dikonversi ke number, lalu
+        --    dibulatkan dengan math.floor().
+        --
+        -- 4. JUMLAH ITEM (`amount`)
+        --    Ambil liveInventory.slots. Untuk setiap slot, cocokkan:
+        --      slot.id == id
+        --    lalu jumlahkan slot.n. Jadi komponen slot yang diperlukan adalah:
+        --      slot.id : ID item pada slot.
+        --      slot.n  : jumlah item pada slot.
+        --
+        -- 5. OBJEK HUD DAN FUNGSI onDrop
+        --    Dari daftar `objects`, cari tabel HUD yang memiliki:
+        --      punchRange : function
+        --      handPower  : function
+        --      onDrop     : function
+        --    Dua function pertama dipakai sebagai ciri kandidat HUD; fungsi
+        --    yang benar-benar dipanggil adalah onDrop.
+        --
+        -- 6. PEMANGGILAN DROP
+        --    pcall(onDrop, id, amount)
+        --    Artinya fungsi menerima dua argumen: ID item dan jumlah item.
+        --    Versi lama hanya memanggil satu kali; tidak ada loop, retry,
+        --    batch, atau pemilihan item tambahan.
+        --
+        -- DAFTAR VARIABLE / KOMPONEN YANG DIPERLUKAN JIKA FITUR DIBANGUN ULANG:
+        --   objects       = hasil getgc(true)
+        --   liveInventory = tabel inventory aktif
+        --   slots         = liveInventory.slots
+        --   capacity      = liveInventory.capacity (validasi kandidat)
+        --   selected      = liveInventory.selected
+        --   id            = ID item terpilih
+        --   slot          = setiap entri di slots
+        --   amount        = total slot.n untuk slot.id yang cocok dengan id
+        --   HUD candidate = tabel dengan punchRange, handPower, onDrop
+        --   onDrop        = fungsi HUD yang dipanggil
+        --
+        -- PENTING:
+        -- Fitur DROP SELECTED INVENTORY berbeda dari AUTO COLLECT PNB.
+        -- AUTO COLLECT mengambil drop yang sudah berada di world melalui
+        -- World.takeDrop / TakeDropRemote. DROP SELECTED INVENTORY meminta HUD
+        -- menjatuhkan item dari inventory melalui HUD.onDrop.
+        --
+        --==================================================
     end)
 
 end -- return function(Hub)
 
 --==================================================
--- END MODULE: AUTO PUT + BREAK + COLLECT
+-- END MODULE: PUT + BREAK + COLLECT + PATHFINDING
 --==================================================
