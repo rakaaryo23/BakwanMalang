@@ -14,6 +14,74 @@ if not LocalPlayer then
     return
 end
 
+
+--==================================================
+-- [00A] MAIN LOADER BRIDGE (AUTO REJOIN)
+-- URL ini harus menunjuk ke main.lua di root repository.
+-- Modul fitur memanggil bridge ini agar UI + semua module dimuat ulang
+-- dengan jalur loader yang sama, bukan membuat Hub kedua secara manual.
+--==================================================
+
+local MAIN_LOADER_URL =
+    "https://raw.githubusercontent.com/rakaaryo23/BakwanMalang/main/main.lua"
+
+local RecoveryEnv = _G
+if type(getgenv) == "function" then
+    local ok, env = pcall(getgenv)
+    if ok and type(env) == "table" then
+        RecoveryEnv = env
+    end
+end
+
+local function ExecuteMainLoader()
+    if type(loadstring) ~= "function" then
+        return false, "loadstring tidak tersedia"
+    end
+
+    local okHttp, source = pcall(function()
+        return game:HttpGet(MAIN_LOADER_URL)
+    end)
+
+    if not okHttp or type(source) ~= "string" or source == "" then
+        return false, "Gagal mengambil main.lua: " .. tostring(source)
+    end
+
+    local okCompile, chunk = pcall(loadstring, source)
+    if not okCompile or type(chunk) ~= "function" then
+        return false, "Gagal compile main.lua: " .. tostring(chunk)
+    end
+
+    local okRun, result = pcall(chunk)
+    if not okRun then
+        return false, "Gagal menjalankan main.lua: " .. tostring(result)
+    end
+
+    return true
+end
+
+-- Bridge dibaca oleh module utama. Diperbarui setiap main.lua dieksekusi.
+RecoveryEnv.__GB_EXECUTE_MAIN_LOADER = ExecuteMainLoader
+
+local function QueueMainLoader()
+    local queue = RecoveryEnv.queue_on_teleport
+        or (type(RecoveryEnv.syn) == "table" and RecoveryEnv.syn.queue_on_teleport)
+        or (type(RecoveryEnv.fluxus) == "table" and RecoveryEnv.fluxus.queue_on_teleport)
+
+    if type(queue) ~= "function" then
+        return false, "queue_on_teleport tidak tersedia"
+    end
+
+    local queuedCode = ("loadstring(game:HttpGet(%q))()"):format(MAIN_LOADER_URL)
+    local ok, err = pcall(queue, queuedCode)
+    if not ok then
+        return false, tostring(err)
+    end
+
+    return true
+end
+
+RecoveryEnv.__GB_QUEUE_MAIN_LOADER = QueueMainLoader
+
 --==================================================
 -- [01] GUI PARENT
 --==================================================
