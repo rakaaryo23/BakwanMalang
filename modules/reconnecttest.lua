@@ -329,6 +329,114 @@ return function(Hub)
             end
         end
 
+        -- Discovery World/Menu mengikuti findRefs() di K.lua:
+        -- getgc(true), urutan ipairs, dan kriteria rawget yang sama.
+        -- Refs K.lua bersifat local di script K.lua sehingga tidak dapat
+        -- diakses langsung dari module ini; karena itu referensinya discan
+        -- ulang dengan prosedur yang sama, bukan memakai finder alternatif.
+        local function recoveryFindEnterRefsLikeK()
+            local worldRef, menuRef = nil, nil
+            if type(getgc) ~= "function" then
+                return nil, nil, "Executor tidak punya getgc()"
+            end
+
+            local ok, objects = pcall(getgc, true)
+            if not ok or type(objects) ~= "table" then
+                return nil, nil, "getgc(true) gagal"
+            end
+
+            for _, v in ipairs(objects) do
+                if type(v) == "table" then
+                    if not worldRef then
+                        local okWorld, isWorld = pcall(function()
+                            return type(rawget(v, "fg")) == "table"
+                                and type(rawget(v, "bg")) == "table"
+                                and type(rawget(v, "w")) == "number"
+                                and type(rawget(v, "h")) == "number"
+                                and rawget(v, "spawn") ~= nil
+                        end)
+                        if okWorld and isWorld then
+                            worldRef = v
+                        end
+                    end
+
+                    if not menuRef then
+                        local okMenu, isMenu = pcall(function()
+                            return type(rawget(v, "openBackpack")) == "function"
+                                and type(rawget(v, "ui")) == "table"
+                        end)
+                        if okMenu and isMenu then
+                            menuRef = v
+                        end
+                    end
+                end
+            end
+
+            return worldRef, menuRef
+        end
+
+        -- Isi fungsi enterWorld(name) disamakan dengan K.lua:
+        --   local w = Refs.World
+        --   oldFg = rawget(w, "fg")
+        --   local m = Refs.Menu
+        --   pcall(m.enter, name), atau fallback pcall(w.enter, name)
+        --   sukses ketika rawget(w, "fg") ~= oldFg dalam 8 detik.
+        -- Recovery hanya menambahkan validasi nama target setelah transisi.
+        local function recoveryEnterWorldLikeK(worldName)
+            local w, m, findError = recoveryFindEnterRefsLikeK()
+            if not w then
+                return false, findError or "World tidak ditemukan"
+            end
+
+            Recovery.WorldRef = w
+            Recovery.MenuRef = m
+
+            if worldName == "" then
+                return false, "nama world tidak diketahui"
+            end
+
+            local oldFg = rawget(w, "fg")
+            if m and type(rawget(m, "enter")) == "function" then
+                -- K.lua memang tidak memeriksa nilai balik pcall pada cabang ini.
+                pcall(m.enter, worldName)
+            elseif type(rawget(w, "enter")) == "function" then
+                local callOK, result, message = pcall(w.enter, worldName)
+                if callOK and not result then
+                    return false, tostring(message or "World.enter mengembalikan false")
+                end
+            else
+                return false, "fungsi masuk world tidak ketemu (Menu.enter dan World.enter)"
+            end
+
+            local t0 = os.clock()
+            while Recovery.Session == RecoverySession and os.clock() - t0 < 8 do
+                -- Sama seperti K.lua: cek perubahan fg pada referensi World
+                -- yang dipakai saat fungsi enter dipanggil.
+                if rawget(w, "fg") ~= oldFg then
+                    local joinedName = rawget(w, "name")
+                    if type(joinedName) == "string"
+                        and joinedName:upper() == worldName:upper() then
+                        return true
+                    end
+
+                    -- Bila game mengganti objek World, ambil referensi baru
+                    -- dengan discovery K.lua dan periksa nama world yang aktif.
+                    local currentWorld = recoveryFindEnterRefsLikeK()
+                    local currentName = recoveryRaw(currentWorld, "name")
+                    if type(currentName) == "string"
+                        and currentName:upper() == worldName:upper() then
+                        Recovery.WorldRef = currentWorld
+                        return true
+                    end
+                end
+                task.wait(0.25)
+            end
+
+            return false, "world penuh / dikunci / gagal (fg tidak berubah dalam 8 detik)"
+        end
+
+        -- Retry recovery tetap berulang, tetapi setiap percobaan sekarang
+        -- menjalankan discovery dan mekanisme enter yang sama dengan K.lua.
         local function recoveryFindAndEnterWorld(worldName, baselineFg, baselineWorld, baselineName)
             if type(worldName) ~= "string" or worldName == "" then
                 recoverySetStatus("GAGAL: nama world tujuan kosong.")
@@ -336,144 +444,40 @@ return function(Hub)
             end
 
             local target = worldName:upper()
-            local baseWorld = baselineWorld
-            local baseFg = baselineFg
-            local baseName = baselineName
             local attempt = 0
-            local lastCallError = nil
-
-            -- Isi baseline dari kondisi menu terkini bila pemanggil tidak
-            -- memiliki referensi. Perubahan setelah titik ini mendeteksi tap manual.
-            if baseWorld == nil or baseFg == nil then
-                local initialWorld = recoveryFindWorldMenu(worldName)
-                if type(initialWorld) == "table" then
-                    baseWorld = baseWorld or initialWorld
-                    baseFg = baseFg or recoveryRaw(initialWorld, "fg")
-                    baseName = baseName or recoveryRaw(initialWorld, "name")
-                end
-            end
-
             recoverySetStatus("TARGET WORLD TERSIMPAN: " .. worldName)
 
             while Recovery.Session == RecoverySession do
-                -- Selalu scan ulang karena game dapat mengganti tabel World/Menu.
-                local world, menu = recoveryFindWorldMenu(worldName)
-                if type(world) == "table" then Recovery.WorldRef = world end
-                if type(menu) == "table" then Recovery.MenuRef = menu end
-
-                local currentName = recoveryRaw(world, "name")
-                local currentFg = recoveryRaw(world, "fg")
-                local nameMatches = type(currentName) == "string"
-                    and currentName:upper() == target
-                local worldChanged = type(world) == "table"
-                    and baseWorld ~= nil and world ~= baseWorld
-                local fgChanged = type(currentFg) == "table"
-                    and baseFg ~= nil and currentFg ~= baseFg
-                local nameChanged = type(currentName) == "string"
-                    and currentName ~= "" and baseName ~= nil
-                    and currentName:upper() ~= tostring(baseName):upper()
-
-                -- Keberhasilan hanya jika nama tepat cocok DAN ada tanda
-                -- transisi dari menu/objek sebelumnya. Tidak cukup hanya fg ada.
-                if nameMatches and (worldChanged or fgChanged or nameChanged) then
-                    Recovery.LastWorld = currentName
-                    recoverySetStatus("BERHASIL MASUK: " .. currentName
-                        .. ". Nama world cocok; menyiapkan reload UI.")
-                    return true
+                local currentWorld = recoveryFindEnterRefsLikeK()
+                local currentName = recoveryRaw(currentWorld, "name")
+                if type(currentName) == "string" and currentName:upper() == target then
+                    local currentFg = rawget(currentWorld, "fg")
+                    local changed = (baselineWorld ~= nil and currentWorld ~= baselineWorld)
+                        or (baselineFg ~= nil and currentFg ~= baselineFg)
+                        or (baselineName ~= nil and currentName:upper() ~= tostring(baselineName):upper())
+                    if changed then
+                        Recovery.WorldRef = currentWorld
+                        Recovery.LastWorld = currentName
+                        recoverySetStatus("BERHASIL MASUK: " .. currentName
+                            .. ". Nama world cocok; menyiapkan reload UI.")
+                        return true
+                    end
                 end
 
                 attempt += 1
                 recoverySetStatus(("MENCOBA ENTER WORLD: %s | Percobaan #%d")
                     :format(worldName, attempt))
 
-                local enterFn = menu and recoveryRaw(menu, "enter")
-                local worldEnterFn = recoveryRaw(world, "enter")
-                local called = false
-                lastCallError = nil
-
-                -- Gunakan urutan yang sama dengan Guard.enterWorld() di K.lua.
-                if type(enterFn) == "function" then
-                    local ok, result, message = pcall(enterFn, worldName)
-                    called = ok
-                    if not ok then
-                        lastCallError = result
-                    elseif result == false then
-                        lastCallError = message or "Menu.enter mengembalikan false"
-                    end
-                    print("[GB RECOVERY] Menu.enter(" .. worldName .. ") dipanggil; pcall=" .. tostring(ok))
-                elseif type(worldEnterFn) == "function" then
-                    local ok, result, message = pcall(worldEnterFn, worldName)
-                    called = ok and result ~= false
-                    if not ok then
-                        lastCallError = result
-                    elseif result == false then
-                        lastCallError = message or "World.enter mengembalikan false"
-                    end
-                    print("[GB RECOVERY] World.enter(" .. worldName .. ") dipanggil; pcall=" .. tostring(ok))
-                else
-                    lastCallError = "Menu.enter dan World.enter belum ditemukan"
-                    print("[GB RECOVERY] " .. lastCallError .. "; scan ulang 1 detik lagi.")
-                end
-
-                if not called and lastCallError then
-                    recoverySetStatus(("MENCOBA ENTER WORLD: %s | Percobaan #%d | Fungsi enter gagal: %s")
-                        :format(worldName, attempt, tostring(lastCallError)))
-                end
-
-                -- Selama menunggu hasil enter, tetap pantau join otomatis maupun
-                -- join manual. Jika nama cocok dan referensi/fg berubah, lanjut.
-                local waitStarted = os.clock()
-                while Recovery.Session == RecoverySession
-                    and os.clock() - waitStarted < 8 do
-                    local checkWorld, checkMenu = recoveryFindWorldMenu(worldName)
-                    if type(checkWorld) == "table" then Recovery.WorldRef = checkWorld end
-                    if type(checkMenu) == "table" then Recovery.MenuRef = checkMenu end
-
-                    local checkName = recoveryRaw(checkWorld, "name")
-                    local checkFg = recoveryRaw(checkWorld, "fg")
-                    local checkMatches = type(checkName) == "string"
-                        and checkName:upper() == target
-                    local checkWorldChanged = type(checkWorld) == "table"
-                        and baseWorld ~= nil and checkWorld ~= baseWorld
-                    local checkFgChanged = type(checkFg) == "table"
-                        and baseFg ~= nil and checkFg ~= baseFg
-                    local checkNameChanged = type(checkName) == "string"
-                        and checkName ~= "" and baseName ~= nil
-                        and checkName:upper() ~= tostring(baseName):upper()
-
-                    if checkMatches and (checkWorldChanged or checkFgChanged or checkNameChanged) then
-                        Recovery.LastWorld = checkName
-                        recoverySetStatus("BERHASIL MASUK: " .. checkName
-                            .. ". Nama world cocok; menyiapkan reload UI.")
-                        return true
-                    end
-
-                    task.wait(0.25)
-                end
-
-                -- Ambil baseline terbaru sebelum percobaan berikutnya.
-                -- Ini membuat watcher juga mengenali perubahan akibat tap manual.
-                local latestWorld, latestMenu = recoveryFindWorldMenu(worldName)
-                if type(latestWorld) == "table" then Recovery.WorldRef = latestWorld end
-                if type(latestMenu) == "table" then Recovery.MenuRef = latestMenu end
-                local latestName = recoveryRaw(latestWorld, "name")
-                local latestFg = recoveryRaw(latestWorld, "fg")
-
-                -- Jika belum cocok, jangan menggeser baseline ke objek baru
-                -- yang mungkin merupakan objek world-menu kosong. Simpan hanya
-                -- baseline referensi awal; perubahan berikutnya tetap terdeteksi.
-                if type(latestName) == "string" and latestName ~= ""
-                    and latestName:upper() == target
-                    and type(latestFg) == "table"
-                    and (latestWorld ~= baseWorld or latestFg ~= baseFg or latestName ~= baseName) then
-                    Recovery.LastWorld = latestName
-                    recoverySetStatus("BERHASIL MASUK: " .. latestName
+                local entered, enterError = recoveryEnterWorldLikeK(worldName)
+                if entered then
+                    Recovery.LastWorld = worldName
+                    recoverySetStatus("BERHASIL MASUK: " .. worldName
                         .. ". Nama world cocok; menyiapkan reload UI.")
                     return true
                 end
 
-                recoverySetStatus(("BELUM MASUK: %s | Percobaan #%d selesai. Akan mencoba lagi.")
-                    :format(worldName, attempt))
+                recoverySetStatus(("MENCOBA ENTER WORLD: %s | Percobaan #%d | %s")
+                    :format(worldName, attempt, tostring(enterError)))
                 task.wait(2)
             end
 
