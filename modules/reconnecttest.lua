@@ -223,8 +223,11 @@ return function(Hub)
             return decoded
         end
 
-        local function recoveryFindWorldMenu()
-            local world, menu
+        -- Selalu scan ulang objek runtime. Objek World bisa diganti game saat
+        -- pindah dari World Menu ke world; referensi lama tidak boleh dipakai
+        -- untuk memutuskan apakah pemain sudah berhasil masuk.
+        local function recoveryFindWorldMenu(preferredWorldName)
+            local firstWorld, matchedWorld, menu
             if type(getgc) ~= "function" then return nil, nil end
 
             local ok, objects = pcall(getgc, true)
@@ -232,13 +235,21 @@ return function(Hub)
 
             for _, object in ipairs(objects) do
                 if type(object) == "table" then
-                    if not world
-                        and type(recoveryRaw(object, "fg")) == "table"
+                    local isWorld = type(recoveryRaw(object, "fg")) == "table"
                         and type(recoveryRaw(object, "bg")) == "table"
                         and type(recoveryRaw(object, "w")) == "number"
                         and type(recoveryRaw(object, "h")) == "number"
-                        and recoveryRaw(object, "spawn") ~= nil then
-                        world = object
+                        and recoveryRaw(object, "spawn") ~= nil
+
+                    if isWorld then
+                        if not firstWorld then firstWorld = object end
+                        local objectName = recoveryRaw(object, "name")
+                        if type(preferredWorldName) == "string"
+                            and preferredWorldName ~= ""
+                            and type(objectName) == "string"
+                            and objectName:upper() == preferredWorldName:upper() then
+                            matchedWorld = object
+                        end
                     end
 
                     if not menu
@@ -247,11 +258,9 @@ return function(Hub)
                         menu = object
                     end
                 end
-
-                if world and menu then break end
             end
 
-            return world, menu
+            return matchedWorld or firstWorld, menu
         end
 
         local function recoveryCurrentWorld()
@@ -309,78 +318,166 @@ return function(Hub)
             recoveryDeleteFile(RECOVERY_FILE)
         end
 
-        -- Masuk world memakai pola K.lua: gunakan satu referensi World/Menu
-        -- yang ditemukan, panggil Menu.enter(name), lalu verifikasi perubahan fg.
-        local function recoveryFindAndEnterWorld(worldName, baselineFg)
+        -- Auto-enter berulang sampai nama world benar-benar terverifikasi.
+        -- Status dikirim ke UI PNB melalui Recovery.SetStatus dan juga ke console.
+        local function recoverySetStatus(message)
+            message = tostring(message or "")
+            Recovery.Status = message
+            print("[GB RECOVERY] " .. message)
+            if type(Recovery.SetStatus) == "function" then
+                pcall(Recovery.SetStatus, message)
+            end
+        end
+
+        local function recoveryFindAndEnterWorld(worldName, baselineFg, baselineWorld, baselineName)
             if type(worldName) ~= "string" or worldName == "" then
+                recoverySetStatus("GAGAL: nama world tujuan kosong.")
                 return false, "Nama world tujuan kosong"
             end
 
-            for attempt = 1, 3 do
-                if Recovery.Session ~= RecoverySession then
-                    return false, "Sesi recovery sudah diganti"
-                end
+            local target = worldName:upper()
+            local baseWorld = baselineWorld
+            local baseFg = baselineFg
+            local baseName = baselineName
+            local attempt = 0
+            local lastCallError = nil
 
-                local world, menu = Recovery.WorldRef, Recovery.MenuRef
-                if type(world) ~= "table" or type(menu) ~= "table" then
-                    world, menu = recoveryFindWorldMenu()
-                end
-                if not world then
-                    Recovery.Status = "Menunggu referensi World untuk masuk " .. worldName
-                    task.wait(1)
-                else
-                    -- Baseline harus FG yang sedang tampil tepat sebelum Menu.enter.
-                    -- Jangan gunakan LastWorldFg yang bisa berasal dari world lama,
-                    -- karena itu dapat membuat menu dianggap sudah berhasil join.
-                    local oldFg = baselineFg or recoveryRaw(world, "fg")
-                    local enterFn = menu and recoveryRaw(menu, "enter")
-                    local worldEnterFn = recoveryRaw(world, "enter")
-                    local called, callError = false, nil
-
-                    -- Prioritas Menu.enter sama seperti Guard.enterWorld pada K.lua.
-                    if type(enterFn) == "function" then
-                        local ok, result, message = pcall(enterFn, worldName)
-                        called = ok
-                        callError = ok and (message or result) or result
-                    elseif type(worldEnterFn) == "function" then
-                        local ok, result, message = pcall(worldEnterFn, worldName)
-                        called = ok and result ~= false
-                        callError = ok and (message or result) or result
-                    else
-                        callError = "Fungsi Menu.enter / World.enter tidak ditemukan"
-                    end
-
-                    if called then
-                        local started = os.clock()
-                        -- K.lua memverifikasi fg pada objek World yang sama.
-                        while Recovery.Session == RecoverySession
-                            and os.clock() - started < 20 do
-                            local currentFg = recoveryRaw(world, "fg")
-                            local currentName = recoveryRaw(world, "name")
-                            local fgChanged = type(currentFg) == "table"
-                                and currentFg ~= oldFg
-
-                            if fgChanged then
-                                Recovery.LastWorld =
-                                    (type(currentName) == "string" and currentName ~= "")
-                                    and currentName or worldName
-                                return true
-                            end
-                            task.wait(0.25)
-                        end
-                        callError = "Menu.enter dipanggil, tetapi World.fg tidak berubah ke world tujuan"
-                    end
-
-                    Recovery.Status = ("Gagal masuk %s (%d/3): %s"):format(
-                        worldName, attempt, tostring(callError)
-                    )
-                    warn("[GB RECOVERY]", Recovery.Status)
-                    task.wait(2)
-                    baselineFg = nil -- retry berikutnya mengambil fg terbaru
+            -- Isi baseline dari kondisi menu terkini bila pemanggil tidak
+            -- memiliki referensi. Perubahan setelah titik ini mendeteksi tap manual.
+            if baseWorld == nil or baseFg == nil then
+                local initialWorld = recoveryFindWorldMenu(worldName)
+                if type(initialWorld) == "table" then
+                    baseWorld = baseWorld or initialWorld
+                    baseFg = baseFg or recoveryRaw(initialWorld, "fg")
+                    baseName = baseName or recoveryRaw(initialWorld, "name")
                 end
             end
 
-            return false, Recovery.Status
+            recoverySetStatus("TARGET WORLD TERSIMPAN: " .. worldName)
+
+            while Recovery.Session == RecoverySession do
+                -- Selalu scan ulang karena game dapat mengganti tabel World/Menu.
+                local world, menu = recoveryFindWorldMenu(worldName)
+                if type(world) == "table" then Recovery.WorldRef = world end
+                if type(menu) == "table" then Recovery.MenuRef = menu end
+
+                local currentName = recoveryRaw(world, "name")
+                local currentFg = recoveryRaw(world, "fg")
+                local nameMatches = type(currentName) == "string"
+                    and currentName:upper() == target
+                local worldChanged = type(world) == "table"
+                    and baseWorld ~= nil and world ~= baseWorld
+                local fgChanged = type(currentFg) == "table"
+                    and baseFg ~= nil and currentFg ~= baseFg
+                local nameChanged = type(currentName) == "string"
+                    and currentName ~= "" and baseName ~= nil
+                    and currentName:upper() ~= tostring(baseName):upper()
+
+                -- Keberhasilan hanya jika nama tepat cocok DAN ada tanda
+                -- transisi dari menu/objek sebelumnya. Tidak cukup hanya fg ada.
+                if nameMatches and (worldChanged or fgChanged or nameChanged) then
+                    Recovery.LastWorld = currentName
+                    recoverySetStatus("BERHASIL MASUK: " .. currentName
+                        .. ". Nama world cocok; menyiapkan reload UI.")
+                    return true
+                end
+
+                attempt += 1
+                recoverySetStatus(("MENCOBA ENTER WORLD: %s | Percobaan #%d")
+                    :format(worldName, attempt))
+
+                local enterFn = menu and recoveryRaw(menu, "enter")
+                local worldEnterFn = recoveryRaw(world, "enter")
+                local called = false
+                lastCallError = nil
+
+                -- Gunakan urutan yang sama dengan Guard.enterWorld() di K.lua.
+                if type(enterFn) == "function" then
+                    local ok, result, message = pcall(enterFn, worldName)
+                    called = ok
+                    if not ok then
+                        lastCallError = result
+                    elseif result == false then
+                        lastCallError = message or "Menu.enter mengembalikan false"
+                    end
+                    print("[GB RECOVERY] Menu.enter(" .. worldName .. ") dipanggil; pcall=" .. tostring(ok))
+                elseif type(worldEnterFn) == "function" then
+                    local ok, result, message = pcall(worldEnterFn, worldName)
+                    called = ok and result ~= false
+                    if not ok then
+                        lastCallError = result
+                    elseif result == false then
+                        lastCallError = message or "World.enter mengembalikan false"
+                    end
+                    print("[GB RECOVERY] World.enter(" .. worldName .. ") dipanggil; pcall=" .. tostring(ok))
+                else
+                    lastCallError = "Menu.enter dan World.enter belum ditemukan"
+                    print("[GB RECOVERY] " .. lastCallError .. "; scan ulang 1 detik lagi.")
+                end
+
+                if not called and lastCallError then
+                    recoverySetStatus(("MENCOBA ENTER WORLD: %s | Percobaan #%d | Fungsi enter gagal: %s")
+                        :format(worldName, attempt, tostring(lastCallError)))
+                end
+
+                -- Selama menunggu hasil enter, tetap pantau join otomatis maupun
+                -- join manual. Jika nama cocok dan referensi/fg berubah, lanjut.
+                local waitStarted = os.clock()
+                while Recovery.Session == RecoverySession
+                    and os.clock() - waitStarted < 8 do
+                    local checkWorld, checkMenu = recoveryFindWorldMenu(worldName)
+                    if type(checkWorld) == "table" then Recovery.WorldRef = checkWorld end
+                    if type(checkMenu) == "table" then Recovery.MenuRef = checkMenu end
+
+                    local checkName = recoveryRaw(checkWorld, "name")
+                    local checkFg = recoveryRaw(checkWorld, "fg")
+                    local checkMatches = type(checkName) == "string"
+                        and checkName:upper() == target
+                    local checkWorldChanged = type(checkWorld) == "table"
+                        and baseWorld ~= nil and checkWorld ~= baseWorld
+                    local checkFgChanged = type(checkFg) == "table"
+                        and baseFg ~= nil and checkFg ~= baseFg
+                    local checkNameChanged = type(checkName) == "string"
+                        and checkName ~= "" and baseName ~= nil
+                        and checkName:upper() ~= tostring(baseName):upper()
+
+                    if checkMatches and (checkWorldChanged or checkFgChanged or checkNameChanged) then
+                        Recovery.LastWorld = checkName
+                        recoverySetStatus("BERHASIL MASUK: " .. checkName
+                            .. ". Nama world cocok; menyiapkan reload UI.")
+                        return true
+                    end
+
+                    task.wait(0.25)
+                end
+
+                -- Ambil baseline terbaru sebelum percobaan berikutnya.
+                -- Ini membuat watcher juga mengenali perubahan akibat tap manual.
+                local latestWorld, latestMenu = recoveryFindWorldMenu(worldName)
+                if type(latestWorld) == "table" then Recovery.WorldRef = latestWorld end
+                if type(latestMenu) == "table" then Recovery.MenuRef = latestMenu end
+                local latestName = recoveryRaw(latestWorld, "name")
+                local latestFg = recoveryRaw(latestWorld, "fg")
+
+                -- Jika belum cocok, jangan menggeser baseline ke objek baru
+                -- yang mungkin merupakan objek world-menu kosong. Simpan hanya
+                -- baseline referensi awal; perubahan berikutnya tetap terdeteksi.
+                if type(latestName) == "string" and latestName ~= ""
+                    and latestName:upper() == target
+                    and type(latestFg) == "table"
+                    and (latestWorld ~= baseWorld or latestFg ~= baseFg or latestName ~= baseName) then
+                    Recovery.LastWorld = latestName
+                    recoverySetStatus("BERHASIL MASUK: " .. latestName
+                        .. ". Nama world cocok; menyiapkan reload UI.")
+                    return true
+                end
+
+                recoverySetStatus(("BELUM MASUK: %s | Percobaan #%d selesai. Akan mencoba lagi.")
+                    :format(worldName, attempt))
+                task.wait(2)
+            end
+
+            return false, "Sesi recovery dihentikan"
         end
 
         local function recoveryExecuteMainLoader()
@@ -411,7 +508,7 @@ return function(Hub)
         -- Jika auto-enter gagal, tetap pantau World Menu. Ketika pemain masuk
         -- sendiri ke nama world yang tersimpan dan World.fg berganti, jalankan
         -- ulang main.lua agar UI dan modul dibangun kembali.
-        local function recoveryWatchManualJoin(snapshot, baselineFg)
+        local function recoveryWatchManualJoin(snapshot, baselineFg, baselineWorld, baselineName)
             if type(snapshot) ~= "table" or type(snapshot.world) ~= "string"
                 or snapshot.world == "" then
                 return
@@ -419,31 +516,45 @@ return function(Hub)
 
             Recovery.Busy = false
             Recovery.Leaving = false
-            Recovery.Status = "Menunggu kamu masuk manual ke world " .. snapshot.world
+            recoverySetStatus("MENUNGGU MASUK MANUAL KE WORLD: " .. snapshot.world)
+            print("[GB RECOVERY] Manual-entry watcher aktif untuk:", snapshot.world)
 
             task.spawn(function()
                 local started = os.clock()
                 local baseFg = baselineFg
+                local baseWorld = baselineWorld
+                local baseName = baselineName
                 local joinDetected = false
                 local loaderAttempts = 0
 
                 while Recovery.Session == RecoverySession
-                    and os.clock() - started < 600 do
-                    local world = Recovery.WorldRef
-                    if type(world) ~= "table" then world = recoveryFindWorldMenu() end
+                    and os.clock() - started < 900 do
+                    -- Wajib scan ulang setiap iterasi; jangan membaca WorldRef lama.
+                    local world, menu = recoveryFindWorldMenu(snapshot.world)
+                    if type(world) == "table" then Recovery.WorldRef = world end
+                    if type(menu) == "table" then Recovery.MenuRef = menu end
+
                     local currentName = recoveryRaw(world, "name")
                     local currentFg = recoveryRaw(world, "fg")
+                    local nameMatches = type(currentName) == "string"
+                        and currentName:upper() == snapshot.world:upper()
 
                     if not joinDetected and type(currentFg) == "table" then
-                        if baseFg == nil then
+                        if baseFg == nil and baseWorld == nil then
                             baseFg = currentFg
-                        elseif currentFg ~= baseFg
-                            and type(currentName) == "string"
-                            and currentName:upper() == snapshot.world:upper() then
-                            joinDetected = true
-                            Recovery.LastWorld = currentName
-                            Recovery.Busy = true
-                            Recovery.Status = "World manual terdeteksi. Menjalankan ulang loader..."
+                            baseWorld = world
+                            baseName = currentName
+                        elseif nameMatches then
+                            local worldChanged = world ~= baseWorld
+                            local fgChanged = currentFg ~= baseFg
+                            local nameChanged = currentName ~= baseName
+                            if worldChanged or fgChanged or nameChanged then
+                                joinDetected = true
+                                Recovery.LastWorld = currentName
+                                Recovery.Busy = true
+                                Recovery.Status = "World manual terdeteksi: " .. currentName
+                                print("[GB RECOVERY] Manual join terdeteksi:", currentName)
+                            end
                         end
                     end
 
@@ -517,10 +628,14 @@ return function(Hub)
             task.spawn(function()
                 task.wait(6.5) -- mengikuti jeda recovery K.lua
 
-                local beforeWorld = Recovery.WorldRef
-                if type(beforeWorld) ~= "table" then beforeWorld = recoveryFindWorldMenu() end
+                local beforeWorld, beforeMenu = recoveryFindWorldMenu(snapshot.world)
+                if type(beforeWorld) == "table" then Recovery.WorldRef = beforeWorld end
+                if type(beforeMenu) == "table" then Recovery.MenuRef = beforeMenu end
                 local beforeFg = recoveryRaw(beforeWorld, "fg")
-                local entered, enterError = recoveryFindAndEnterWorld(snapshot.world, beforeFg)
+                local entered, enterError = recoveryFindAndEnterWorld(
+                    snapshot.world, beforeFg, beforeWorld,
+                    recoveryRaw(beforeWorld, "name")
+                )
                 if entered then
                     task.wait(1.5)
                     Recovery.Status = "Berhasil masuk " .. snapshot.world .. ". Menjalankan ulang loader..."
@@ -531,7 +646,10 @@ return function(Hub)
                     end
                     Recovery.Status = "World berhasil dimasuki, tetapi loader gagal: " .. tostring(executeError)
                     warn("[GB RECOVERY]", Recovery.Status)
-                    recoveryWatchManualJoin(snapshot, beforeFg)
+                    recoveryWatchManualJoin(
+                        snapshot, beforeFg, beforeWorld,
+                        recoveryRaw(beforeWorld, "name")
+                    )
                     return
                 else
                     Recovery.Status = "Auto-enter gagal: " .. tostring(enterError)
@@ -540,10 +658,14 @@ return function(Hub)
 
                 -- Ambil fg SETELAH percobaan auto-enter gagal. Perubahan fg
                 -- berikutnya menjadi sinyal bahwa pengguna berhasil masuk manual.
-                local menuWorld = Recovery.WorldRef
-                if type(menuWorld) ~= "table" then menuWorld = recoveryFindWorldMenu() end
+                local menuWorld, menuMenu = recoveryFindWorldMenu(snapshot.world)
+                if type(menuWorld) == "table" then Recovery.WorldRef = menuWorld end
+                if type(menuMenu) == "table" then Recovery.MenuRef = menuMenu end
                 local menuFg = recoveryRaw(menuWorld, "fg")
-                recoveryWatchManualJoin(snapshot, menuFg)
+                recoveryWatchManualJoin(
+                    snapshot, menuFg, menuWorld,
+                    recoveryRaw(menuWorld, "name")
+                )
             end)
         end
 
@@ -609,7 +731,7 @@ return function(Hub)
 
             Recovery.Busy = true
             Recovery.Leaving = false
-            Recovery.Status = "Snapshot ditemukan. Menunggu world " .. saved.world
+            recoverySetStatus("SNAPSHOT DITEMUKAN. TARGET WORLD: " .. saved.world)
 
             task.spawn(function()
                 local started = os.clock()
@@ -620,8 +742,9 @@ return function(Hub)
 
                 while Recovery.Session == RecoverySession
                     and os.clock() - started < 600 do
-                    local world = Recovery.WorldRef
-                    if type(world) ~= "table" then world = recoveryFindWorldMenu() end
+                    local world, menu = recoveryFindWorldMenu(saved.world)
+                    if type(world) == "table" then Recovery.WorldRef = world end
+                    if type(menu) == "table" then Recovery.MenuRef = menu end
                     local name = recoveryRaw(world, "name")
                     local fg = recoveryRaw(world, "fg")
 
@@ -637,7 +760,9 @@ return function(Hub)
                     if not triedEnter and os.clock() - started >= 8 then
                         triedEnter = true
                         watchBaseFg = fg
-                        local entered = recoveryFindAndEnterWorld(saved.world, fg)
+                        local entered = recoveryFindAndEnterWorld(
+                            saved.world, fg, world, name
+                        )
                         if entered then
                             worldReady = true
                             enteredByWorker = true
@@ -645,14 +770,19 @@ return function(Hub)
                         end
                         -- Catat fg menu setelah auto-enter gagal agar join manual
                         -- dapat dikenali dari perubahan referensi fg berikutnya.
-                        local afterWorld = recoveryFindWorldMenu()
+                        local afterWorld, afterMenu = recoveryFindWorldMenu(saved.world)
+                        if type(afterWorld) == "table" then Recovery.WorldRef = afterWorld end
+                        if type(afterMenu) == "table" then Recovery.MenuRef = afterMenu end
                         watchBaseFg = recoveryRaw(afterWorld, "fg")
                     end
                     task.wait(0.5)
                 end
 
                 if not worldReady then
-                    recoveryWatchManualJoin(saved, watchBaseFg)
+                    recoveryWatchManualJoin(
+                        saved, watchBaseFg, Recovery.WorldRef,
+                        recoveryRaw(Recovery.WorldRef, "name")
+                    )
                     return
                 end
 
@@ -667,7 +797,11 @@ return function(Hub)
                     end
                     Recovery.Status = "World aktif, tetapi loader gagal: " .. tostring(executeError)
                     warn("[GB RECOVERY]", Recovery.Status)
-                    recoveryWatchManualJoin(saved, recoveryRaw(recoveryFindWorldMenu(), "fg"))
+                    local failedWorld = recoveryFindWorldMenu(saved.world)
+                    recoveryWatchManualJoin(
+                        saved, recoveryRaw(failedWorld, "fg"), failedWorld,
+                        recoveryRaw(failedWorld, "name")
+                    )
                     return
                 end
 
@@ -1032,6 +1166,12 @@ return function(Hub)
             "Status: idle | menunggu perintah", 34, mainPanel
         )
         statusLabel.LayoutOrder = 1
+
+        -- Hubungkan status recovery ke label PNB agar proses enter terlihat
+        -- langsung di UI, bukan hanya tersimpan di Recovery.Status/console.
+        Recovery.SetStatus = function(message)
+            report("RECOVERY: " .. tostring(message))
+        end
 
         selectedLabel = makeLabel(
             "Inventory: tekan MANUAL SCAN INVENTORY", 28, mainPanel
